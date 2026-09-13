@@ -8,7 +8,7 @@ export function getRuleExamples(): Record<
 			bad: `@Injectable()
 export class AuthService {
   private readonly apiKey = 'sk-1234567890abcdef';
-  private readonly dbPassword = 'super_secret_password';
+  private readonly dbPassword = 'super_secret_password_2024';
 }`,
 			good: `@Injectable()
 export class AuthService {
@@ -507,7 +507,7 @@ export class OrderService {
 		"architecture/no-orm-in-services": {
 			bad: `@Injectable()
 export class UserService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly em: EntityManager) {}
 }`,
 			good: `@Injectable()
 export class UserService {

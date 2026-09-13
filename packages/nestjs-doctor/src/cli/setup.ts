@@ -1,8 +1,9 @@
+import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import type { SourceInclusion } from "../common/artifact.js";
 import { isScopeMode, type ScopeMode } from "../common/scope.js";
-import type { BootstrapTimings } from "../common/timings.js";
 import { parseShareSections, type ShareSectionId } from "../report/share.js";
+import type { LoadedBootTrace } from "../report/timings.js";
 import { logger } from "../ui/logger.js";
 import {
 	type BlockingLevel,
@@ -23,14 +24,16 @@ export interface ScanOptions {
 	blocking: BlockingLevel;
 	changedFilesFrom: string | undefined;
 	configPath: string | undefined;
+	format: OutputFormat;
 	minScore: string | undefined;
+	/** One id per invocation, shared by the payload and the report beacon. */
+	scanId: string;
 	scope: ScopeMode;
 	staged: boolean;
 	telemetry: boolean;
 }
 
 export interface PipelineOptions extends ScanOptions {
-	format: OutputFormat;
 	/** True when the run ends in the menu; set after setup from `canPrompt`. */
 	interactive: boolean;
 	isMachineReadable: boolean;
@@ -48,8 +51,10 @@ export interface PipelineOptions extends ScanOptions {
 	/** How much source text the report artifact embeds. */
 	sources: SourceInclusion;
 	/** Parsed bootstrap dump, for the artifact's module-graph overlay. */
-	timings?: BootstrapTimings;
+	traces?: LoadedBootTrace[];
 	verbose: boolean;
+	/** Worker-internal: the worker builds the code graph for its outcome. */
+	wantsCodeGraph?: boolean;
 }
 
 /** Picks only the engine fields. */
@@ -58,7 +63,9 @@ export const toScanOptions = (options: PipelineOptions): ScanOptions => ({
 	blocking: options.blocking,
 	changedFilesFrom: options.changedFilesFrom,
 	configPath: options.configPath,
+	format: options.format,
 	minScore: options.minScore,
+	scanId: options.scanId,
 	scope: options.scope,
 	staged: options.staged,
 	telemetry: options.telemetry,
@@ -323,12 +330,12 @@ export class CliSetup {
 		}
 
 		const format = resolveFormat(this.args);
-		let timings: BootstrapTimings | undefined;
+		let traces: LoadedBootTrace[] | undefined;
 		if (this.args.timings) {
 			if (format === "report-json") {
-				const { loadBootstrapTimings } = await import("../report/timings.js");
-				const loaded = loadBootstrapTimings(this.targetPath, this.args.timings);
-				timings = loaded.timings;
+				const { loadBootstrapTraces } = await import("../report/timings.js");
+				const loaded = loadBootstrapTraces(this.targetPath, this.args.timings);
+				traces = loaded.traces;
 				for (const warning of loaded.warnings) {
 					logger.warn(warning);
 				}
@@ -353,6 +360,7 @@ export class CliSetup {
 				jsonCompact: this.args["json-compact"] ?? false,
 				minScore: this.args["min-score"],
 				outputPath: this.args.output,
+				scanId: randomUUID(),
 				scope: resolveScopeMode(this.args),
 				score,
 				shareCode: this.args["share-code"] ?? false,
@@ -360,7 +368,7 @@ export class CliSetup {
 				sources: resolveSources(this.args),
 				staged: this.args.staged ?? false,
 				telemetry: this.args.telemetry ?? true,
-				timings,
+				traces,
 				verbose: this.args.verbose ?? false,
 			},
 		};

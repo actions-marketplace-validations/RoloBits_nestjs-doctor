@@ -1,14 +1,17 @@
 import { readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
-import { type SourceFile, SyntaxKind } from "ts-morph";
+import { type Node, type SourceFile, SyntaxKind } from "ts-morph";
 import type { Diagnostic } from "../common/diagnostic.js";
 import type { RuleErrorInfo } from "../common/result.js";
 import type { AnalysisContext } from "./analysis-context.js";
 import { filterIgnoredDiagnostics } from "./filter-diagnostics.js";
-import { guardDecoratorNames } from "./graph/guard-decorators.js";
+import {
+	guardDecoratorNames,
+	isGuardDecorator,
+} from "./graph/guard-decorators.js";
 import { posixDirname } from "./graph/module-graph.js";
 import { filterSuppressedDiagnostics } from "./inline-suppressions.js";
-import { isInjectable } from "./nest-class-inspector.js";
+import { baseClassName, isInjectable } from "./nest-class-inspector.js";
 import type { FileRuleFacts } from "./rule-runner.js";
 import {
 	type RunRulesOptions,
@@ -85,30 +88,34 @@ function resolveSourceText(
 			const raw = readFileSync(filePath, "utf8");
 			return raw.includes(SUPPRESSION_MARKER) ? blankPrismaStrings(raw) : raw;
 		} catch {
-			return;
+			// An unreadable source file reports without a snippet.
 		}
 	}
-	return;
 }
 
 export interface RawDiagnosticOutput {
 	diagnostics: Diagnostic[];
 	elapsedMs: number;
 	ruleErrors: RuleErrorInfo[];
+	/** How many diagnostics each rule id lost to an inline directive. */
+	suppressed: Record<string, number>;
 }
 
 function processResults(
 	rawDiagnostics: Diagnostic[],
 	errors: { ruleId: string; error: unknown }[],
-	context: AnalysisContext
+	context: AnalysisContext,
+	onSuppressed?: (ruleId: string) => void
 ): { diagnostics: Diagnostic[]; errors: RuleErrorInfo[] } {
 	const configFiltered = filterIgnoredDiagnostics(
 		rawDiagnostics,
 		context.config,
 		context.targetPath
 	);
-	const diagnostics = filterSuppressedDiagnostics(configFiltered, (filePath) =>
-		resolveSourceText(context, filePath)
+	const diagnostics = filterSuppressedDiagnostics(
+		configFiltered,
+		(filePath) => resolveSourceText(context, filePath),
+		onSuppressed
 	);
 	const ruleErrors: RuleErrorInfo[] = errors.map((e) => ({
 		ruleId: e.ruleId,
@@ -118,6 +125,53 @@ function processResults(
 }
 
 const MODULE_FILE_RE = /\.module\.[mc]?ts$/;
+
+const NEST_APP_FACTORY = /\bNestFactory\s*\.\s*create\s*[<(]/;
+const NEST_APP_TYPE = /\bI?Nest\w*Application\b/;
+
+// True when the expression is the HTTP app: a `NestFactory.create()` result, or a
+// binding initialised from one or typed as a Nest application.
+function isNestApplication(expression: Node): boolean {
+	if (NEST_APP_FACTORY.test(expression.getText())) {
+		return true;
+	}
+	const identifier = expression.asKind(SyntaxKind.Identifier);
+	if (!identifier) {
+		return false;
+	}
+	return (identifier.getSymbol()?.getDeclarations() ?? []).some(
+		(declaration) => {
+			const variable = declaration.asKind(SyntaxKind.VariableDeclaration);
+			const typeText =
+				variable?.getTypeNode()?.getText() ??
+				declaration.asKind(SyntaxKind.Parameter)?.getTypeNode()?.getText();
+			if (typeText && NEST_APP_TYPE.test(typeText)) {
+				return true;
+			}
+			const initializer = variable?.getInitializer()?.getText();
+			return initializer !== undefined && NEST_APP_FACTORY.test(initializer);
+		}
+	);
+}
+
+// True when the file calls `.useGlobalGuards(guard)` on the HTTP app.
+function usesGlobalGuards(sourceFile: SourceFile): boolean {
+	if (!sourceFile.getFullText().includes("useGlobalGuards")) {
+		return false;
+	}
+	return sourceFile
+		.getDescendantsOfKind(SyntaxKind.CallExpression)
+		.some((call) => {
+			const access = call
+				.getExpression()
+				.asKind(SyntaxKind.PropertyAccessExpression);
+			return (
+				access?.getName() === "useGlobalGuards" &&
+				call.getArguments().length > 0 &&
+				isNestApplication(access.getExpression())
+			);
+		});
+}
 
 /** Project-wide facts for the file rules, gathered once per run. */
 function fileRuleFacts(context: AnalysisContext): FileRuleFacts {
@@ -149,24 +203,28 @@ function fileRuleFacts(context: AnalysisContext): FileRuleFacts {
 
 	const composedDecorators = guardDecoratorNames(context.guardDecorators);
 	const guardedBaseClasses = new Set<string>();
+	const guardedClasses = new Set<string>();
+	let callsUseGlobalGuards = false;
 	for (const filePath of context.files) {
 		const sourceFile = context.astProject.getSourceFile(filePath);
 		if (!sourceFile) {
 			continue;
 		}
+		callsUseGlobalGuards ||= usesGlobalGuards(sourceFile);
 		for (const cls of sourceFile.getClasses()) {
-			const base = cls.getExtends()?.getExpression().getText();
-			if (!base) {
-				continue;
-			}
 			const guarded = cls
 				.getDecorators()
-				.some(
-					(d) =>
-						d.getName() === "UseGuards" || composedDecorators.has(d.getName())
-				);
-			if (guarded) {
-				guardedBaseClasses.add(base.split("<")[0].split(".").pop() ?? base);
+				.some((d) => isGuardDecorator(d, composedDecorators));
+			if (!guarded) {
+				continue;
+			}
+			const name = cls.getName();
+			if (name) {
+				guardedClasses.add(name);
+			}
+			const base = baseClassName(cls);
+			if (base) {
+				guardedBaseClasses.add(base);
 			}
 		}
 	}
@@ -175,10 +233,11 @@ function fileRuleFacts(context: AnalysisContext): FileRuleFacts {
 		diProviders,
 		guards: {
 			composedDecorators,
-			globallyRegistered: modules.some((module) =>
-				module.providerTokens.includes("APP_GUARD")
-			),
+			globallyRegistered:
+				callsUseGlobalGuards ||
+				modules.some((module) => module.providerTokens.includes("APP_GUARD")),
 			guardedBaseClasses,
+			guardedClasses,
 		},
 		moduleDirectories,
 	};
@@ -212,7 +271,10 @@ export function checkAllFiles(context: AnalysisContext): {
 	return processResults(result.diagnostics, result.errors, context);
 }
 
-export function checkProject(context: AnalysisContext): {
+export function checkProject(
+	context: AnalysisContext,
+	onSuppressed?: (ruleId: string) => void
+): {
 	diagnostics: Diagnostic[];
 	errors: RuleErrorInfo[];
 } {
@@ -232,16 +294,20 @@ export function checkProject(context: AnalysisContext): {
 	const { diagnostics, errors } = processResults(
 		result.diagnostics,
 		result.errors,
-		context
+		context,
+		onSuppressed
 	);
-	const schemaResult = checkSchema(context);
+	const schemaResult = checkSchema(context, onSuppressed);
 	diagnostics.push(...schemaResult.diagnostics);
 	errors.push(...schemaResult.errors);
 
 	return { diagnostics, errors };
 }
 
-export function checkSchema(context: AnalysisContext): {
+export function checkSchema(
+	context: AnalysisContext,
+	onSuppressed?: (ruleId: string) => void
+): {
 	diagnostics: Diagnostic[];
 	errors: RuleErrorInfo[];
 } {
@@ -254,7 +320,12 @@ export function checkSchema(context: AnalysisContext): {
 	}
 
 	const result = runSchemaRules(context.schemaGraph, context.schemaRules);
-	return processResults(result.diagnostics, result.errors, context);
+	return processResults(
+		result.diagnostics,
+		result.errors,
+		context,
+		onSuppressed
+	);
 }
 
 export async function diagnose(
@@ -262,6 +333,9 @@ export async function diagnose(
 	onFileChecked?: (checked: number, total: number) => void
 ): Promise<RawDiagnosticOutput> {
 	const startTime = performance.now();
+	const suppressed = new Map<string, number>();
+	const count = (ruleId: string) =>
+		suppressed.set(ruleId, (suppressed.get(ruleId) ?? 0) + 1);
 	const facts = fileRuleFacts(context);
 	const rawDiagnostics: Diagnostic[] = [];
 	const errors: { ruleId: string; error: unknown }[] = [];
@@ -281,12 +355,13 @@ export async function diagnose(
 			await yieldToEventLoop();
 		}
 	}
-	const fileResult = processResults(rawDiagnostics, errors, context);
-	const projectResult = checkProject(context);
+	const fileResult = processResults(rawDiagnostics, errors, context, count);
+	const projectResult = checkProject(context, count);
 	const elapsedMs = performance.now() - startTime;
 	return {
 		diagnostics: [...fileResult.diagnostics, ...projectResult.diagnostics],
 		elapsedMs,
 		ruleErrors: [...fileResult.errors, ...projectResult.errors],
+		suppressed: Object.fromEntries(suppressed),
 	};
 }

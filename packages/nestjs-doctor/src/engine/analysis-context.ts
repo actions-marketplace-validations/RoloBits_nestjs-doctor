@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import type { Project } from "ts-morph";
+import type { CodeGraph } from "../common/code-graph.js";
 import type { NestjsDoctorConfig } from "../common/config.js";
 import type { EndpointGraph } from "../common/endpoint.js";
 import type { ProjectInfo } from "../common/result.js";
@@ -8,6 +9,7 @@ import { loadConfigWithFallback } from "./config/loader.js";
 import { resolveScanConfig, type ScanConfig } from "./config/scan-config.js";
 import { collectFiles, collectMonorepoFiles } from "./file-collector.js";
 import { createAstParser } from "./graph/ast-parser.js";
+import { buildCodeGraph } from "./graph/code-graph.js";
 import {
 	buildEndpointGraphWithProgress,
 	updateEndpointGraphForFile,
@@ -31,6 +33,7 @@ import {
 	resolveProvidersAsync,
 	updateProvidersForFile,
 } from "./graph/type-resolver.js";
+import { startPhaseTimer } from "./phase-timer.js";
 import { detectProject, type MonorepoInfo } from "./project-detector.js";
 import { filterRules, separateRules } from "./rules/rule-pipeline.js";
 import type { ProjectRule, Rule, SchemaRule } from "./rules/types.js";
@@ -57,6 +60,28 @@ export interface AnalysisContext {
 	schemaGraph?: SchemaGraph;
 	schemaRules: SchemaRule[];
 	targetPath: string;
+}
+
+/** Built on first use, since only a report reads it, and dropped on any edit. */
+const codeGraphs = new WeakMap<AnalysisContext, CodeGraph>();
+
+/**
+ * The code graph for this context. Costs a pass over every indexed method, so
+ * nothing on the diagnostics path calls it.
+ */
+export function codeGraphFor(context: AnalysisContext): CodeGraph {
+	const cached = codeGraphs.get(context);
+	if (cached) {
+		return cached;
+	}
+	const graph = buildCodeGraph(
+		context.astProject,
+		context.files,
+		context.providers,
+		context.endpointGraph.endpoints
+	);
+	codeGraphs.set(context, graph);
+	return graph;
 }
 
 export type AnalysisPhase = "collecting" | "parsing" | "analyzing";
@@ -88,11 +113,13 @@ export async function buildAnalysisContext(
 	onProgress?: AnalysisProgress
 ): Promise<AnalysisContext> {
 	const { config, fileRules, projectRules, schemaRules } = scanConfig;
+	const mark = startPhaseTimer(targetPath);
 	onProgress?.("collecting");
 	const [files, project] = await Promise.all([
 		collectFiles(targetPath, config),
 		detectProject(targetPath),
 	]);
+	mark("collect");
 	const { aliases: pathAliases, baseUrl } = loadTsconfigResolution(targetPath);
 	const astProject = await createAstParser(
 		files,
@@ -100,6 +127,7 @@ export async function buildAnalysisContext(
 		baseUrl,
 		(parsed, total) => onProgress?.("parsing", parsed, total)
 	);
+	mark("parse");
 	onProgress?.("analyzing");
 	await yieldToEventLoop();
 	const moduleGraph = await buildModuleGraphAsync(
@@ -108,8 +136,10 @@ export async function buildAnalysisContext(
 		pathAliases
 	);
 	warnDuplicateModuleNames(moduleGraph, scanConfig.customRuleWarnings);
+	mark("modules");
 	await yieldToEventLoop();
 	const providers = await resolveProvidersAsync(astProject, files);
+	mark("providers");
 	await yieldToEventLoop();
 	const endpointGraph = await buildEndpointGraphWithProgress(
 		astProject,
@@ -117,9 +147,16 @@ export async function buildAnalysisContext(
 		providers,
 		(traced, total) => onProgress?.("analyzing", traced, total)
 	);
+	mark("endpoints");
 	await yieldToEventLoop();
 	const schemaGraph = extractSchema(astProject, files, project.orm, targetPath);
+	mark("schema");
 	await yieldToEventLoop();
+	const guardDecorators = await buildGuardDecoratorIndexAsync(
+		astProject,
+		files
+	);
+	mark("guards");
 
 	return {
 		astProject,
@@ -127,7 +164,7 @@ export async function buildAnalysisContext(
 		endpointGraph,
 		fileRules,
 		files,
-		guardDecorators: await buildGuardDecoratorIndexAsync(astProject, files),
+		guardDecorators,
 		moduleGraph,
 		pathAliases,
 		project,
@@ -150,6 +187,7 @@ export async function prepareAnalysis(
 }
 
 export function updateFile(context: AnalysisContext, filePath: string): void {
+	codeGraphs.delete(context);
 	const existing = context.astProject.getSourceFile(filePath);
 	if (existing) {
 		context.astProject.removeSourceFile(existing);
@@ -165,7 +203,8 @@ export function updateFile(context: AnalysisContext, filePath: string): void {
 		context.moduleGraph,
 		context.astProject,
 		filePath,
-		context.pathAliases
+		context.pathAliases,
+		context.files
 	);
 	updateGuardDecoratorIndexForFile(
 		context.guardDecorators,
@@ -208,10 +247,12 @@ async function buildSubProjectContext(
 ): Promise<AnalysisContext> {
 	const { config: rootConfig, combinedRules } = scanConfig;
 	const projectPath = join(targetPath, monorepo.projects.get(name)!);
+	const mark = startPhaseTimer(name);
 	const [project, projectConfig] = await Promise.all([
 		detectProject(projectPath),
 		loadConfigWithFallback(projectPath, rootConfig),
 	]);
+	mark("detect");
 
 	const { aliases: pathAliases, baseUrl } = loadTsconfigResolution(projectPath);
 	const astProject = await createAstParser(
@@ -220,6 +261,7 @@ async function buildSubProjectContext(
 		baseUrl,
 		(parsed, total) => onProgress?.("parsing", parsed, total)
 	);
+	mark("parse");
 	onProgress?.("analyzing");
 	await yieldToEventLoop();
 	const moduleGraph = await buildModuleGraphAsync(
@@ -228,8 +270,10 @@ async function buildSubProjectContext(
 		pathAliases
 	);
 	warnDuplicateModuleNames(moduleGraph, scanConfig.customRuleWarnings);
+	mark("modules");
 	await yieldToEventLoop();
 	const providers = await resolveProvidersAsync(astProject, files);
+	mark("providers");
 	await yieldToEventLoop();
 	const endpointGraph = await buildEndpointGraphWithProgress(
 		astProject,
@@ -237,6 +281,7 @@ async function buildSubProjectContext(
 		providers,
 		(traced, total) => onProgress?.("analyzing", traced, total)
 	);
+	mark("endpoints");
 	await yieldToEventLoop();
 	let schemaGraph = extractSchema(astProject, files, project.orm, projectPath);
 	// Falls back to the workspace root, where a monorepo usually keeps its schema.
@@ -247,8 +292,14 @@ async function buildSubProjectContext(
 	) {
 		schemaGraph = rootSchemaFor(project.orm, astProject, files);
 	}
+	mark("schema");
 	const rules = filterRules(projectConfig, combinedRules);
 	const { fileRules, projectRules, schemaRules } = separateRules(rules);
+	const guardDecorators = await buildGuardDecoratorIndexAsync(
+		astProject,
+		files
+	);
+	mark("guards");
 
 	return {
 		astProject,
@@ -256,7 +307,7 @@ async function buildSubProjectContext(
 		endpointGraph,
 		fileRules,
 		files,
-		guardDecorators: await buildGuardDecoratorIndexAsync(astProject, files),
+		guardDecorators,
 		moduleGraph,
 		pathAliases,
 		project,

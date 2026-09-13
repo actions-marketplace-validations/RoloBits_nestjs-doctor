@@ -38,7 +38,11 @@ Run this at your project root:
 npx nestjs-doctor@latest .
 ```
 
-![nestjs-doctor scoring a project 35 out of 100, an agent fixing the findings, and a rescan scoring 100](https://nestjs.doctor/demo.gif)
+[![nestjs-doctor scoring a project 35 out of 100, an agent fixing the findings, and a rescan scoring 100](https://nestjs.doctor/demo.svg)](https://nestjs.doctor)
+
+A clean scan prints the score and nothing else. That is the expected result on
+a project the rules already agree with, and `--report` still draws the module
+graph, the traced endpoints and the schema diagram.
 
 Add `--verbose` for file paths and line numbers.
 
@@ -149,6 +153,19 @@ constructor(private readonly prisma: PrismaService) {}
 - **Other CI:** GitLab Code Quality, SARIF for any code-scanning backend, or a markdown body to post yourself. [Docs →](https://nestjs.doctor/docs/ci)
 - **Node API:** `diagnose()` plus an incremental API for editors and long-running processes. [Docs →](https://nestjs.doctor/docs/reference/node-api)
 - **Monorepos:** detected from `nest-cli.json`, pnpm workspaces, `package.json` workspaces, Nx, or Lerna. [Docs →](https://nestjs.doctor/docs/pipeline/project-detection)
+
+## Telemetry
+
+The CLI reports rule errors and anonymous run data to help us catch bugs and prioritize work.
+
+We collect:
+
+- Environment: CLI version, platform, Node version, and how it ran (npx, script, coding agent, or CI)
+- Project shape: file count, framework, ORM, Nest version (NO file contents)
+- Rules fired: rule ids and counts only (e.g. `security/no-eval`) (NO code or specific findings)
+- Rules that threw during the scan
+
+To opt out, run: `npx nestjs-doctor@latest --no-telemetry`. [Details →](https://nestjs.doctor/docs/telemetry)
 
 ## Contributing
 

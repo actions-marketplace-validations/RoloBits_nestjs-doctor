@@ -1,5 +1,72 @@
 # nestjs-doctor
 
+## 0.9.9
+
+### Patch Changes
+
+- 640d7c3: Group every arm of an `if` / `else if` / `else` chain under the `if` the chain opens with, so mutually exclusive arms share a branch group instead of splitting across three. The tail `else` no longer reports the condition of the arm above it, which was the one condition guaranteeing the else does not run; a chained else now carries no condition text, since none describes it.
+- 640d7c3: Fix five identity defects in the code graph, all the same root cause: keying a node on a name rather than a declaration. Two injected members whose types share a simple name (`StoreA.Store` and `StoreB.Store`) no longer route both calls to the first member; two packages exporting the same type name no longer share one node; an aliased import no longer splits one interface into two nodes; and a base class sharing its subclass's name is no longer skipped when resolving an inherited call. Merging sub-project graphs is now independent of the order they arrive in, so a shared library's method bodies survive however a monorepo is scanned. A plain statement that shared a source line with a tracked call was mistaken for that call and dropped from the endpoint tree; it now appears as a step, which adds a step node to any method written that way.
+- 640d7c3: Build the code graph during a scan and embed it in the report artifact, so `--report` and `--format report-json` carry one node per declared method with each call site as an edge. Calls to functions and static methods the project declares are now nodes too, which on a 1444-file monorepo adds 142 nodes and 1048 edges. Nothing else builds it: a console scan, `--format json` and `--score` are unchanged and pay nothing.
+- 640d7c3: Kind a class that composes `Controller()` through a wrapper decorator as a controller in the code graph. A codebase using `@XxxRestController()` instead of a literal `@Controller()` had every handler kinded as a service, so 245 of 249 endpoints on a 1444-file monorepo reported the wrong layer.
+- 640d7c3: Order each endpoint's dependency list by where a call finishes rather than where it starts, so `save(findOne(id))` shows the fetch before the save. Every method is renumbered, not only the ones containing an inline logic step, which closes the gaps a merged guard-throw used to leave in the sequence. On a 157-endpoint project 45 endpoints reorder and the set of nodes is unchanged.
+- 640d7c3: Label a `for await (const x of xs)` loop `for-await-of` instead of `for-of`, so a sequential-await loop is distinguishable from a plain iteration.
+- 640d7c3: Add the project-wide code graph to the Node API: one node per declared method of every Nest class, with each call site as an edge, so a method reached by two endpoints is one node instead of one subtree per path. Each node carries its ordered body, so a consumer can replay what an endpoint does: the conditions enclosing each call, which arms are mutually exclusive, where control returns or throws, whether a call is awaited, and which `try` covers it. `encodeCodeGraph` and `decodeCodeGraph` round-trip it through a compact form that is under a third of the size. Building it costs a pass over every indexed method, so only a caller that reads the report artifact pays for it.
+- 2ba6a4c: Replace the report's Endpoints canvas with a walk of the code graph: every method a route reaches laid out by call depth with one wire per call site, a player that steps the execution walk, a one-line verdict on whether the route's first database call is a read or a write, and a source pane that opens a method beside the map (a database or external node opens at the call site that reached it). The interactive menu's HTML report now carries the code graph, and the artifact gains an optional `root`, the posix path the scan ran from. A report saved before the code graph existed shows no Endpoints tab instead of the old canvas. A share written from the report's own dialog carries the code graph, with file paths relative to the scan root, so its Endpoints tab opens; a share from the command line or the menu does not.
+
+## 0.9.8
+
+### Patch Changes
+
+- 78fe270: A decorator that composes `UseGuards` now counts as a guard even when it returns the call directly instead of wrapping it in `applyDecorators`, when it is written as `export const X = function () {...}`, and when it is declared in one package and used in another. A decorator only counts when every path out of it returns a guard, so one that guards on a single branch no longer clears a route. `security/require-guards-on-endpoints` drops from 246 findings to 22 on a 249-route monorepo whose auth decorator lives in a shared library.
+- 2292d22: Setting `NESTJS_DOCTOR_PHASE_TIMINGS=1` prints how long each stage of the analysis context took to stderr. A single project marks collect, parse, modules, providers, endpoints, schema and guards; a monorepo sub-project marks detect instead of collect, since its files were gathered for every project at once beforehand. Nothing changes without the variable, and the scan output is untouched either way.
+- 2292d22: `correctness/no-fire-and-forget-async` no longer guesses from a method name when the receiver's type is written down. A call like `this.socket.send(data)`, where `socket` is declared as a type the scan cannot read, was reported as an unawaited promise even though the method returns void. A receiver the class never declares still falls back to the name, which is what the check was for.
+- 2292d22: The scan no longer reads installed packages when resolving types. A 354-file project spent 7.3 of its 8.0 seconds having TypeScript parse and type 182 MB of `node_modules`; it now takes 0.7 seconds, and a 45-project monorepo went from 76 to 12 seconds. Workspace packages linked into `node_modules` stay visible, so a decorator or base class in your own library still resolves. A type that only an installed dependency knows now reads as `any`, which affects rules that inspect a return type rather than a declaration.
+
+## 0.9.7
+
+### Patch Changes
+
+- 8959511: Fix `injectable-must-be-provided` false positives when a `useClass` or `provide` value is an expression such as a helper call, a ternary, a property access or a mixin, by following the value to every class it can evaluate to. Count `useExisting` targets and factory `inject` entries as uses for `no-unused-providers` and `no-unused-module-exports`, never as registrations, so a class that is only a `useExisting` target and provided nowhere is now reported.
+- 8f8604b: Fix `injectable-must-be-provided`, `no-unused-providers` and `no-unused-module-exports` false positives for providers registered only through a `DynamicModule`, such as the object a `forRoot()`, `register()`, a standalone function, a `ConfigurableModuleBuilder` `setExtras` callback or a `forRootAsync({ useClass })` option registers. A `providers` key on a testing module, a registry object or a config object still registers nothing.
+
+## 0.9.6
+
+### Patch Changes
+
+- Print findings from rules without the `score` surface under a `Not scored` heading after every scored finding in the console report, and last in the interactive view; scores, exit codes and machine-readable output are unchanged.
+- Stop `performance/no-unused-module-exports` flagging an export consumed only through an object-literal provider: `{ provide: 'MAILER', useExisting: MailService }` or `useClass` in a module importing `MailModule` now counts `MailService` as used.
+- Honour `--no-telemetry`, `DO_NOT_TRACK` and the `telemetry` and `report.telemetry` config keys for a report generated from the post-scan menu, which always embedded the report beacon before; the integration suite gains a NestJS 12 ESM fixture.
+- Stop `architecture/no-circular-module-deps` reporting a cycle that exists in no file: two `@Module()` classes sharing a name were analysed as one module with their imports unioned, so two acyclic files reported `CoreModule -> UsersModule` at `error`. Detection now walks each declaration and follows each import statement to the file it resolves to; a real cycle is still reported once. A regression from 0.9.x, and scores rise wherever it fired.
+- Fold `ModuleNode.importTargetsByFile` into `importsByFile` as `{ names, targets }` per declaration file; both fields are new this cycle, so no published shape or diagnostic changes.
+- Stop `security/no-hardcoded-secrets` flagging identifier-shaped strings under a suspicious name: header names (`x-api-key`), config and storage keys, file paths, constant names (`JWT_SECRET_TOKEN_PROVIDER`), password-strength regexes and single title-cased words, and stop reporting a bare 64-character hex digest on its own, so migration ids and persisted-query hashes are quiet. Vendor formats (`sk_live_`, `ghp_`, `AKIA`, JWT), `user:pass` pairs and symbol-bearing passwords such as `P@ssw0rd(2024)!` still report; a purely alphabetic phrase like `correct-horse-battery-staple` is an accepted false negative. Scores rise wherever the rule fired on non-secrets.
+- Stop `security/require-guards-on-endpoints` reporting every endpoint in an app that binds its guard with `app.useGlobalGuards(guard)` on a `NestFactory.create()` result or an `INestApplication`-typed variable, or a controller inheriting a guard from its base class; an empty call or one on a microservice handle still leaves endpoints reported. At 2.25 points per handler this is the largest score mover in the release.
+- Print one line on the first console scan on a machine pointing at the VS Code extension and the `nestjs-doctor-lsp` language server, then never again, and never in CI, inside a coding agent, in a machine-readable format, off a TTY, or once the language server has run. The first-run telemetry notice is gone; [the telemetry page](https://nestjs.doctor/docs/telemetry) still documents every field and every opt-out.
+- Drop `schema/require-timestamps` from `warning` to `info` (0.55 points per entity instead of 1.65, and `--blocking warning` no longer fails on it) and skip join tables; `architecture/no-orm-in-services` no longer reports `PrismaService` or `PrismaClient`, so the official Prisma recipe is quiet.
+- Lead the npm description, the `--help` header and the agent skill with one tagline: "The deterministic NestJS devtool that catches AI mistakes."
+- Report a CI scan as `ci.<provider>.<hash>`, a one-way digest of the runner's numeric repository id (`GITHUB_REPOSITORY_ID`, `CI_PROJECT_ID`), instead of one shared anonymous id per provider; it is never derived from the repository name, path, remote URL or commit sha. `NESTJS_DOCTOR_TELEMETRY_DEBUG=1` prints the exact scan payload to stderr and sends nothing, and the `--telemetry` help and the Action's `telemetry` input name every opt-out.
+- Add `trigger`, `scan_id`, `output_format`, `report_requested`, `total_ms` and `suppressed_inline` to the `scan_completed` payload, and send it for `--report` runs, which reported nothing before.
+
+## 0.9.5
+
+### Patch Changes
+
+- Print one summary line instead of one warning per module when several `@Module` class names are each declared in more than one file; `--verbose` restores the per-module detail, and the Node API's warnings stay complete.
+
+## 0.9.4
+
+### Patch Changes
+
+- Show one boot trace per entry point: `--timings` takes a labelled comma list of dumps (`api.json,worker=worker.json`), each trace keeps its own clock behind a picker, dumps attribute to monorepo projects, and the artifact gains an additive `graph.traces` while the old singular fields keep mirroring the primary trace.
+- Give the whole boot timeline one piecewise time scale, so widened sub-millisecond columns stay readable while bars, hook spans, guides, axis ticks, and the minimap move together and every printed label reads true time.
+- Render every boot phase as a legible section: hover tips with time and meaning, minimum widths, a woven fill for empty phases, stacked name-over-time labels, and self-time on labels when bars cover less than 95% of a phase.
+- Draw each lifecycle-hook run as its own positioned span instead of a merged offsetless chip, count overlapping runs once in module totals, and mark hooks recorded outside their phase with a striped `past its phase` marker.
+- Stop the timeline lying at the edges: reclocked consumers no longer inherit a shared dependency's wait, offscreen rows show edge ticks, the init/bootstrap boundary derives from hook starts when the dump lacks a marker, and middleware timed during `app.init()` stays out of the trace.
+- Align the overview lane and axis with the rows by reserving the same scrollbar gutter, everywhere including the modules graph's trace dock.
+- Polish the Modules Graph: the detail panel takes the whole sidebar with a short fade, the trace badge opens the boot drawer in place, the canvas resizes after the drawer commits and keeps every node's screen position, arrows keep the import direction on selection, the legend popover opens again and wears the shared panel style, and the projects tree shows hover indent guides.
+- Keep every focused table on the Relational Schema canvas: selections accumulate (star layout for one root, overview for several), the show-all view keeps opened groups lit, and the entity tree gains the same hover indent guides.
+- Render the share dialog and the viewer's open-a-report window through one `Modal` molecule, exported from `nestjs-doctor/report-ui`.
+- Behavior changes: `buildReportArtifact` takes `traces` (`LoadedBootTrace[]`) instead of `timings`; a hook the dump gives no offset no longer renders on its class row and hook entries drop `count`; a dump carrying only hook timings no longer surfaces an empty Boot tab.
+
 ## 0.9.3
 
 ### Patch Changes

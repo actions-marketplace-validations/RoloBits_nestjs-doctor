@@ -3,6 +3,7 @@ import type {
 	SerializedModuleGraph,
 	SerializedModuleNode,
 } from "../../../../common/artifact.js";
+import { bareModuleName } from "../../../../common/artifact.js";
 import { REPORT_FONT_STACK } from "../../font.js";
 import {
 	type ModuleTiming,
@@ -54,10 +55,7 @@ interface MgEdge {
 }
 
 export function displayName(n: { name: string; project?: string }): string {
-	if (n.project && n.name.indexOf(`${n.project}/`) === 0) {
-		return n.name.slice(n.project.length + 1);
-	}
-	return n.name;
+	return bareModuleName(n);
 }
 
 function buildProjectColorMap(
@@ -269,6 +267,12 @@ export class ModulesCanvas {
 		if (w === this.w && h === this.h) {
 			this.scheduleRedraw();
 			return;
+		}
+		// The draw transform scales around the canvas centre, so shift the
+		// camera to keep every world point at its screen position.
+		if (this.w > 0 && this.h > 0) {
+			this.camX += ((w - this.w) / 2) * (1 - 1 / this.zoom);
+			this.camY += ((h - this.h) / 2) * (1 - 1 / this.zoom);
 		}
 		this.w = w;
 		this.h = h;
@@ -755,7 +759,7 @@ export class ModulesCanvas {
 			}
 			let lineWidth = e.cross || e.cycle ? 1.6 : 1.3;
 			// Selection edges split by direction: imports vs used-by.
-			// Dashes move along the value flow, from imported to importer.
+			// Arrowheads and dashes keep the import direction, importer to imported.
 			let isSelEdge = false;
 			if (this.selected && !e.cycle) {
 				if (e.from === this.selected.name) {
@@ -785,9 +789,8 @@ export class ModulesCanvas {
 			}
 			ctx.globalAlpha = alpha;
 			if (isSelEdge) {
-				// Arrowheads on selection edges follow the value flow.
 				ctx.lineDashOffset = -this.dashT;
-				this.drawArrow(p2.x, p2.y, p1.x, p1.y, color, dash, lineWidth);
+				this.drawArrow(p1.x, p1.y, p2.x, p2.y, color, dash, lineWidth);
 				ctx.lineDashOffset = 0;
 			} else {
 				this.drawArrow(p1.x, p1.y, p2.x, p2.y, color, dash, lineWidth);
@@ -835,7 +838,7 @@ export class ModulesCanvas {
 			const hp1 = this.boxPort(hoverPair[0], hoverPair[1].x, hoverPair[1].y);
 			const hp2 = this.boxPort(hoverPair[1], hoverPair[0].x, hoverPair[0].y);
 			ctx.lineDashOffset = -this.dashT;
-			this.drawArrow(hp2.x, hp2.y, hp1.x, hp1.y, "#ffffff", [8, 6], 2.6);
+			this.drawArrow(hp1.x, hp1.y, hp2.x, hp2.y, "#ffffff", [8, 6], 2.6);
 			ctx.lineDashOffset = 0;
 			ctx.globalAlpha = 1;
 		}

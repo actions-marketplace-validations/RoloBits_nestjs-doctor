@@ -20,6 +20,7 @@ import {
 } from "../../src/engine/scanner.js";
 
 const FIXTURES = resolve(import.meta.dirname, "../fixtures");
+const QUOTED_NAME = /'([^']+)'/;
 const tempRoots: string[] = [];
 
 afterAll(() => {
@@ -1296,6 +1297,129 @@ describe("scanner integration", () => {
 					factoryClasses.some((name) => d.message.includes(`'${name}'`))
 			);
 			expect(projectRuleDiags).toHaveLength(0);
+		});
+	});
+
+	describe("dynamic-class-providers-app fixture (#400)", () => {
+		const targetPath = resolve(FIXTURES, "dynamic-class-providers-app/src");
+		let diags: Awaited<ReturnType<typeof buildResult>>["result"]["diagnostics"];
+
+		beforeAll(async () => {
+			const scanConfig = await resolveScanConfig(targetPath);
+			const context = await buildAnalysisContext(targetPath, scanConfig);
+			const rawOutput = await diagnose(context);
+			const { result } = buildResult(
+				context,
+				rawOutput,
+				scanConfig.customRuleWarnings
+			);
+			diags = result.diagnostics;
+		});
+
+		const registrationRules = [
+			"correctness/injectable-must-be-provided",
+			"performance/no-unused-providers",
+		];
+
+		it("counts a class reached through a useClass expression as provided", () => {
+			const resolvedClasses = [
+				"AppService",
+				"SmtpMailer",
+				"FakeMailer",
+				"AuditService",
+			];
+			const registrationDiags = diags.filter(
+				(d) =>
+					registrationRules.includes(d.rule) &&
+					resolvedClasses.some((name) => d.message.includes(`'${name}'`))
+			);
+			expect(registrationDiags).toHaveLength(0);
+		});
+
+		it("counts a factory inject entry as an injection", () => {
+			const injected = diags.filter(
+				(d) =>
+					d.rule === "performance/no-unused-providers" &&
+					d.message.includes("'ConfigService'")
+			);
+			expect(injected).toHaveLength(0);
+		});
+
+		it("still reports a class a useClass helper merely calls", () => {
+			const unregistered = diags.filter(
+				(d) =>
+					d.rule === "correctness/injectable-must-be-provided" &&
+					d.message.includes("'UnregisteredService'")
+			);
+			expect(unregistered).toHaveLength(1);
+		});
+	});
+
+	describe("dynamic-module-providers-app fixture (#403)", () => {
+		const targetPath = resolve(FIXTURES, "dynamic-module-providers-app/src");
+		let context: Awaited<ReturnType<typeof buildAnalysisContext>>;
+		let diags: Awaited<ReturnType<typeof buildResult>>["result"]["diagnostics"];
+
+		beforeAll(async () => {
+			const scanConfig = await resolveScanConfig(targetPath);
+			context = await buildAnalysisContext(targetPath, scanConfig);
+			const rawOutput = await diagnose(context);
+			const { result } = buildResult(
+				context,
+				rawOutput,
+				scanConfig.customRuleWarnings
+			);
+			diags = result.diagnostics;
+		});
+
+		const registrationRules = [
+			"correctness/injectable-must-be-provided",
+			"performance/no-unused-providers",
+			"performance/no-unused-module-exports",
+		];
+		const dynamicallyRegistered = [
+			"CacheService",
+			"CacheMetricsService",
+			"LoggerService",
+			"HttpMetricsService",
+			"MailService",
+			"MailConfig",
+		];
+
+		it.each(dynamicallyRegistered)(
+			"reports nothing about %s from the registration rules",
+			(name) => {
+				const findings = diags.filter(
+					(d) =>
+						registrationRules.includes(d.rule) &&
+						d.message.includes(`'${name}'`)
+				);
+				expect(findings).toHaveLength(0);
+			}
+		);
+
+		it("reports exactly the three classes registered nowhere", () => {
+			const unregistered = diags
+				.filter((d) => d.rule === "correctness/injectable-must-be-provided")
+				.map((d) => d.message.match(QUOTED_NAME)?.[1])
+				.sort();
+			expect(unregistered).toEqual([
+				"FakeCache",
+				"StripeGateway",
+				"UnregisteredService",
+			]);
+		});
+
+		it("maps a forRoot-only provider to its module", () => {
+			expect(
+				context.moduleGraph.providerToModule.get("CacheService")?.name
+			).toBe("CacheModule");
+		});
+
+		it("lists a setExtras provider on the module extending the built class", () => {
+			expect(
+				context.moduleGraph.modules.get("HttpModule")?.providers
+			).toContain("HttpMetricsService");
 		});
 	});
 

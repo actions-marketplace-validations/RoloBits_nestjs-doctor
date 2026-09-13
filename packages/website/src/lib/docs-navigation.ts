@@ -35,6 +35,10 @@ export const DOCS_NAV: NavSection[] = [
 				title: "NestJS Doctor vs Nest Devtools",
 				href: "/docs/nest-devtools-alternative",
 			},
+			{
+				title: "NestJS Doctor vs ESLint plugins",
+				href: "/docs/nestjs-eslint-plugins",
+			},
 		],
 	},
 	{
@@ -50,6 +54,7 @@ export const DOCS_NAV: NavSection[] = [
 		items: [
 			{ title: "Config files", href: "/docs/configuration" },
 			{ title: "Custom rule configuration", href: "/docs/custom-rules" },
+			{ title: "Telemetry", href: "/docs/telemetry" },
 		],
 	},
 	{

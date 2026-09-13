@@ -1,6 +1,6 @@
 # NestJS Doctor
 
-> Diagnose and fix your NestJS code in one command. 52 built-in rules across security, performance, correctness, architecture, and schema. Outputs a 0-100 score with actionable diagnostics. An interactive HTML report visualizes the module dependency graph with circular imports highlighted, traced HTTP endpoints, and an ER diagram of the database schema. Zero config. Monorepo support. Ships an official GitHub Action that reports only what a pull request introduced.
+> The deterministic NestJS devtool that catches AI mistakes. 52 built-in rules across security, performance, correctness, architecture, and schema. Outputs a 0-100 score with actionable diagnostics. An interactive HTML report visualizes the module dependency graph with circular imports highlighted, traced HTTP endpoints, and an ER diagram of the database schema. Zero config. Monorepo support. Ships an official GitHub Action that reports only what a pull request introduced.
 
 ## Quick Start
 
@@ -40,6 +40,7 @@ Options:
   --report              Generate an interactive HTML report (--graph also works)
   --timings <path>      SerializedGraph dump to overlay bootstrap init times on the report
   --sources <mode>      How much source text the report carries: all (default), touched (only files with findings), none
+  --no-telemetry        Scan without reporting the scan_completed event
   --share-sections <csv> Write nestjs-doctor-shared.json beside the project with only these sections: score, endpoints, schema, modules, findings:<category>
   --share-code          With --share-sections, include a few lines of code around each shared finding
   --config <p>          Path to config file
@@ -104,7 +105,7 @@ directives cannot silence either rule; use `ignore.rules`.
 
 `--report` writes an interactive HTML report whose Modules Graph tab draws the module graph built from the project's `@Module()` decorators. Circular imports render red and are listed as chains with the fix guidance from `architecture/no-circular-module-deps`. Selecting a module gives its blast radius, meaning every module that transitively imports it, split into direct and indirect with the chain between them. Two toggles start off: `@Global()` reach draws the wiring Nest does implicitly, and external modules adds package modules as separate nodes. A monorepo produces one merged graph with a labeled cluster per sub-project and cross-project imports drawn in cyan.
 
-The graph is decorator text, not a running app. Two `@Module()` classes with the same name in different directories collapse into one node outside a monorepo. A module produced only by a factory returning a `DynamicModule` never becomes an edge. `--report` ignores `--scope`, `--base`, `--staged`, `--min-score`, and `--blocking`, and always exits 0.
+The graph is decorator text, not a running app. Two `@Module()` classes with the same name in different directories collapse into one node outside a monorepo. A factory's returned `DynamicModule` yields one edge, to the module its `module` key names, and the `imports` inside that literal yield none. `--report` ignores `--scope`, `--base`, `--staged`, `--min-score`, and `--blocking`, and always exits 0.
 
 Docs: https://nestjs.doctor/docs/report/module-graph
 
@@ -223,7 +224,7 @@ surfaces: `cli`, `prComment`, `score`, `ciFailure`, all four by default. Only
 rules whose surfaces include `score` are counted; a rule set to `["cli"]` still
 reports every finding in the console and the HTML report, and weighs nothing.
 `correctness/no-async-without-await` and `correctness/prefer-readonly-injection`
-are `["cli"]`, so they never comment on a pull request and never fail a build. Override per rule with `"rules": { "<id>": { "surfaces": [...] } }`.
+are `["cli"]`, so they never comment on a pull request and never fail a build. The console prints those findings last, under a "Not scored" heading. Override per rule with `"rules": { "<id>": { "surfaces": [...] } }`.
 
 Severity weights: error = 3.0, warning = 1.5, info = 0.5
 Category multipliers: security = 1.5x, correctness = 1.3x, schema = 1.1x, architecture = 1.0x, performance = 0.8x
@@ -340,10 +341,14 @@ Docs: https://nestjs.doctor/docs/language-server
 ### Schema (3)
 
 - `require-primary-key` (error) — Entity with no primary key column
-- `require-timestamps` (warning) — Entity missing createdAt/updatedAt columns
+- `require-timestamps` (info) — Entity missing createdAt/updatedAt columns
 - `require-cascade-rule` (info) — Relation with no explicit onDelete behavior
 
 Schema rules run against entities extracted from Prisma, TypeORM, Drizzle, or MikroORM. They report against an entity, so their findings carry no line number.
+
+## Telemetry
+
+A finished scan reports one `scan_completed` event: CLI version, Node major version, platform, how the run started, file count, framework, ORM, Nest version, dependencies matched against a fixed list, built-in rule ids with counts, and the score. Never code, paths, the project name, globs, or custom rule names. Opt out with `--no-telemetry`, `"telemetry": false` in the config, or `DO_NOT_TRACK=1`. `NESTJS_DOCTOR_TELEMETRY_DEBUG=1` prints the payload instead of sending it. Details: https://nestjs.doctor/docs/telemetry
 
 ## Links
 

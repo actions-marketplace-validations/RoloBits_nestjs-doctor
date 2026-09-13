@@ -1,3 +1,4 @@
+import type { EncodedCodeGraph } from "./code-graph-codec.js";
 import type { Diagnostic } from "./diagnostic.js";
 import type { EndpointGraph } from "./endpoint.js";
 import type {
@@ -57,6 +58,15 @@ export interface SerializedModuleNode {
 	providerTokens?: string[];
 }
 
+/** One boot trace: a dump's classes and phases, attributed to a project when known. */
+interface SerializedBootTrace {
+	label: string;
+	phases?: BootPhases;
+	project?: string;
+	startupMs?: number;
+	trace: Record<string, TraceNode>;
+}
+
 export interface SerializedModuleGraph {
 	bootstrapRoots?: string[];
 	circularDepRecommendations: Record<string, string>;
@@ -68,6 +78,7 @@ export interface SerializedModuleGraph {
 	startupMs?: number;
 	timingsAvailable?: boolean;
 	timingsTrace?: Record<string, TraceNode>;
+	traces?: SerializedBootTrace[];
 }
 
 /**
@@ -76,16 +87,26 @@ export interface SerializedModuleGraph {
  * consume the same bytes.
  */
 export interface ReportArtifact {
+	/**
+	 * The code graph, encoded: one node per declared method, one edge per call
+	 * site. Absent when the scan did not build it.
+	 */
+	codeGraph?: EncodedCodeGraph;
 	diagnostics: Diagnostic[];
 	elapsedMs: number;
 	endpoints: EndpointGraph;
 	examples: RuleExampleMap;
 	generatedAt: string;
-	generator: { name: "nestjs-doctor"; version: string };
+	generator: { name: "nestjs-doctor"; scanId?: string; version: string };
 	graph: SerializedModuleGraph;
 	monorepo: boolean;
 	project: ProjectInfo;
 	providers: ReportProvider[];
+	/**
+	 * Where the scan ran, posix and without a trailing slash. Every path in this
+	 * artifact outside `share` is absolute; `share` paths are relative to it.
+	 */
+	root?: string;
 	ruleErrors: RuleErrorInfo[];
 	schema: SerializedSchemaGraph;
 	schemaVersion: typeof REPORT_ARTIFACT_VERSION;
@@ -97,4 +118,11 @@ export interface ReportArtifact {
 	/** Full source text keyed by absolute posix path. */
 	sources: Record<string, string>;
 	summary: DiagnoseSummary;
+}
+
+/** Strips the monorepo project prefix from a module name. */
+export function bareModuleName(m: { name: string; project?: string }): string {
+	return m.project && m.name.startsWith(`${m.project}/`)
+		? m.name.slice(m.project.length + 1)
+		: m.name;
 }

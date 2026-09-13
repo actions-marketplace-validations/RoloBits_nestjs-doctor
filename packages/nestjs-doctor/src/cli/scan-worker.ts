@@ -18,7 +18,6 @@ const post = (message: ScanWorkerMessage): void => {
 
 const options: PipelineOptions = {
 	...request.options,
-	format: "console",
 	interactive: false,
 	isMachineReadable: true,
 	jsonCompact: false,
@@ -31,8 +30,9 @@ const options: PipelineOptions = {
 	shareSections: undefined,
 	skipOutput: true,
 	sources: "none",
-	timings: undefined,
+	traces: undefined,
 	verbose: false,
+	wantsCodeGraph: request.wantsCodeGraph,
 };
 
 try {

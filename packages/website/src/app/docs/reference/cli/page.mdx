@@ -72,8 +72,8 @@ compares against the base revision rather than the file list.
 
 `--format report-json` writes the same document the HTML report embeds, as
 versioned JSON for another tool to load: the score, findings, module graph,
-providers, endpoints, schema, rule examples, source text, and the slices behind
-[Sharing a report](/docs/report/share). It writes
+providers, endpoints, code graph, schema, rule examples, source text, and the
+slices behind [Sharing a report](/docs/report/share). It writes
 `nestjs-doctor-report.json` beside the scanned project, or wherever `--output`
 points, and replaces the console report. The HTML report and the JSON artifact
 are built from that one document, so they always agree.
@@ -129,8 +129,8 @@ screen.
 Handing off detects Claude Code, Codex, and Cursor on your PATH and starts the
 one you pick with the top findings as its first prompt, plainly: no
 permission-skipping flags are passed. Copy the prompt instead to use any other
-agent. The prompt never leaves your machine; the scan itself reports only
-anonymous rule counts.
+agent. The prompt never leaves your machine; what the scan itself reports is
+listed on [Telemetry](/docs/telemetry).
 
 The menu never appears where it could hang a machine. It is skipped in CI,
 inside coding agents, in pipes, in `dumb` terminals, and in every mode other

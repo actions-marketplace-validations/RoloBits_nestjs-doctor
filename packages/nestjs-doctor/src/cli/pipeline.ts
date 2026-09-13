@@ -1,8 +1,15 @@
 import { performance } from "node:perf_hooks";
 import type { ReportArtifact, ReportProvider } from "../common/artifact.js";
+import type { CodeGraph } from "../common/code-graph.js";
+import {
+	type EncodedCodeGraph,
+	encodeCodeGraph,
+} from "../common/code-graph-codec.js";
 import type { Diagnostic } from "../common/diagnostic.js";
 import type { DiagnoseResult } from "../common/result.js";
+import { codeGraphFor } from "../engine/analysis-context.js";
 import { computeBaselineDelta } from "../engine/baseline.js";
+import { mergeCodeGraphs } from "../engine/graph/code-graph.js";
 import {
 	detachModuleGraph,
 	mergeModuleGraphs,
@@ -33,11 +40,16 @@ import {
 import { buildReportArtifact, collectScanFacts } from "../report/artifact.js";
 import { buildHtmlReport } from "../report/html-report.js";
 import { resetEcosystem } from "../telemetry/ecosystem.js";
+import { markHint, readHints } from "../telemetry/install-id.js";
+import { reportTelemetryEnabled } from "../telemetry/send.js";
+import { highlighter } from "../ui/highlighter.js";
 import { logger } from "../ui/logger.js";
+import { EXTENSION_HINT, extensionHintSite } from "./extension-hint.js";
 import {
 	printConsoleReport,
 	printMonorepoReport,
 } from "./formatters/console-reporter.js";
+import { summarizeWarnings } from "./formatters/warning-summary.js";
 import { resolveMinScore } from "./min-score.js";
 import {
 	getCliVersion,
@@ -88,12 +100,13 @@ export interface InteractiveArtifacts {
 
 const displayCustomRuleWarnings = (
 	warnings: string[],
-	isMachineReadable: boolean
+	isMachineReadable: boolean,
+	verbose: boolean
 ): void => {
 	if (isMachineReadable) {
 		return;
 	}
-	for (const warning of warnings) {
+	for (const warning of summarizeWarnings(warnings, verbose)) {
 		logger.warn(warning);
 	}
 };
@@ -120,8 +133,12 @@ abstract class ScanPipeline {
 	protected workerWarnings: string[] = [];
 	/** Set when any scanned sub-project declares its own opt-out. */
 	protected subProjectOptOut = false;
+	/** Whether a report built from the menu may embed its beacon; decided with the config. */
+	protected reportTelemetry = false;
 	/** Warnings raised while narrowing the scope; surfaced alongside the report. */
 	protected scopeWarnings: string[] = [];
+	/** Constructed in the worker for an interactive run, so this times the engine middle there. */
+	protected readonly startedAt = performance.now();
 	protected readonly steps: PipelineStep[] = [];
 	protected readonly targetPath: string;
 
@@ -138,7 +155,9 @@ abstract class ScanPipeline {
 		diagnostics: Diagnostic[],
 		result: DiagnoseResult,
 		fileCount: number,
-		monorepo: boolean
+		monorepo: boolean,
+		totalMs: number,
+		suppressed: Record<string, number>
 	): void {
 		reportScanTelemetry({
 			blocking: this.options.blocking,
@@ -146,12 +165,19 @@ abstract class ScanPipeline {
 			fileCount,
 			monorepo,
 			optionsTelemetry: this.options.telemetry,
+			outputFormat: this.options.format,
 			result,
 			scanConfig: this.scanConfig,
+			scanId: this.options.scanId,
 			scopeRequested: this.options.scope,
 			subProjectOptOut: this.subProjectOptOut,
+			suppressed,
 			targetPath: this.targetPath,
+			totalMs,
 		});
+		this.reportTelemetry =
+			reportTelemetryEnabled(this.options.telemetry, this.scanConfig.config) &&
+			!this.subProjectOptOut;
 	}
 
 	abstract applyScope(): this;
@@ -183,7 +209,8 @@ abstract class ScanPipeline {
 			this.stopProgress();
 			displayCustomRuleWarnings(
 				this.scanConfig.customRuleWarnings,
-				this.options.isMachineReadable
+				this.options.isMachineReadable,
+				this.options.verbose
 			);
 		});
 		return this;
@@ -241,6 +268,19 @@ abstract class ScanPipeline {
 			delta.introduced,
 			buildScopeInfo(scope, { baselineAvailable: true, fixed: delta.fixed })
 		);
+	}
+
+	/** One line, once per install, pointing at the editor extension. */
+	protected printExtensionHint(site: "menu" | "run"): void {
+		const target = extensionHintSite({
+			hints: readHints(),
+			interactive: this.options.interactive,
+			isMachineReadable: this.options.isMachineReadable,
+			tty: process.stderr.isTTY === true,
+		});
+		if (target === site && markHint("extension")) {
+			console.error(highlighter.dim(EXTENSION_HINT));
+		}
 	}
 
 	/** Ends the spinner so nothing prints through an active frame. */
@@ -336,7 +376,8 @@ abstract class ScanPipeline {
 				this.stopProgress();
 				displayCustomRuleWarnings(
 					this.workerWarnings,
-					this.options.isMachineReadable
+					this.options.isMachineReadable,
+					this.options.verbose
 				);
 				await this.outputStep?.();
 				return;
@@ -351,6 +392,7 @@ abstract class ScanPipeline {
 		} finally {
 			stopWatching();
 			this.stopProgress();
+			this.printExtensionHint("run");
 		}
 	}
 }
@@ -379,11 +421,31 @@ export class MonorepoPipeline extends ScanPipeline {
 	private result!: MonorepoEngineResult;
 	private scanStartTime!: number;
 	private cachedArtifact: ReportArtifact | undefined;
+	/** Inline-suppression counts summed across every sub-project. */
+	private readonly suppressedInline: Record<string, number> = {};
+	/** Kept only when something downstream will ask for the report artifact. */
+	private readonly codeGraphs: CodeGraph[] = [];
+	/** Set when the scan ran in a worker, which encodes the graph there. */
+	private encodedCodeGraph: EncodedCodeGraph | undefined;
+
+	/** Whether anything downstream reads the report artifact. */
+	private get wantsArtifact(): boolean {
+		return (
+			this.options.interactive ||
+			this.options.format === "report-json" ||
+			this.options.wantsCodeGraph === true
+		);
+	}
 
 	/** The scan as one serializable document, built once on demand. */
 	get reportArtifact(): ReportArtifact {
 		if (!this.cachedArtifact) {
 			const { moduleGraphs, result } = this.result;
+			const codeGraph =
+				this.encodedCodeGraph ??
+				(this.codeGraphs.length > 0
+					? encodeCodeGraph(mergeCodeGraphs(this.codeGraphs))
+					: undefined);
 			this.cachedArtifact = buildReportArtifact({
 				targetPath: this.targetPath,
 				moduleGraph: mergeModuleGraphs(moduleGraphs),
@@ -392,9 +454,11 @@ export class MonorepoPipeline extends ScanPipeline {
 				files: this.allFiles,
 				providers: this.allProviders,
 				bootstrapRoots: this.bootstrapRoots,
+				...(codeGraph ? { codeGraph } : {}),
 				monorepo: true,
+				scanId: this.options.scanId,
 				sources: this.options.sources,
-				timings: this.options.timings,
+				traces: this.options.traces,
 				version: getCliVersion(),
 			});
 		}
@@ -404,10 +468,14 @@ export class MonorepoPipeline extends ScanPipeline {
 	/** What the post-scan menu needs, without re-scanning. */
 	get interactiveArtifacts(): InteractiveArtifacts {
 		return {
-			buildReportHtml: () => buildHtmlReport(this.reportArtifact),
+			buildReportHtml: () =>
+				buildHtmlReport(this.reportArtifact, {
+					telemetry: this.reportTelemetry,
+				}),
 			moduleGraph: () => this.reportArtifact.graph,
 			printSummary: () => {
 				printMonorepoReport(this.result.result, this.options.verbose, true);
+				this.printExtensionHint("menu");
 			},
 			result: this.result.result.combined,
 			subProjects: this.result.result.subProjects.map(({ name, result }) => ({
@@ -450,9 +518,17 @@ export class MonorepoPipeline extends ScanPipeline {
 					const facts = collectScanFacts({ ...context, projectName: name });
 					this.bootstrapRoots.push(...facts.bootstrapRoots);
 					this.allProviders.push(...facts.providers);
+					// Each sub-project's context is dropped as the scan moves on, so a
+					// graph the artifact will want has to be taken here.
+					if (this.wantsArtifact) {
+						this.codeGraphs.push(codeGraphFor(context));
+					}
 					const rawOutput = await diagnose(context, (checked, total) => {
 						this.emitProgress(`${label} — running rules`, checked, total);
 					});
+					for (const [id, n] of Object.entries(rawOutput.suppressed)) {
+						this.suppressedInline[id] = (this.suppressedInline[id] ?? 0) + n;
+					}
 					const scanResult = buildResult(context, rawOutput);
 					return {
 						...scanResult,
@@ -487,7 +563,9 @@ export class MonorepoPipeline extends ScanPipeline {
 				combined.diagnostics,
 				combined,
 				combined.project.fileCount,
-				true
+				true,
+				performance.now() - this.startedAt,
+				this.suppressedInline
 			);
 		});
 		return this;
@@ -502,12 +580,14 @@ export class MonorepoPipeline extends ScanPipeline {
 				options: toScanOptions(this.options),
 				monorepo: this.monorepo,
 				version: getCliVersion(),
+				wantsCodeGraph: true,
 			},
 			(outcome) => {
 				if (outcome.kind !== "monorepo") {
 					throw new Error("unexpected scan outcome");
 				}
 				this.workerWarnings = outcome.customRuleWarnings;
+				this.encodedCodeGraph = outcome.codeGraph;
 				this.result = {
 					customRuleWarnings: outcome.customRuleWarnings,
 					moduleGraphs: outcome.moduleGraphs,
@@ -517,6 +597,7 @@ export class MonorepoPipeline extends ScanPipeline {
 				this.allProviders.push(...outcome.reportProviders);
 				this.bootstrapRoots.push(...outcome.bootstrapRoots);
 				this.subProjectOptOut = outcome.subProjectOptOut;
+				this.reportTelemetry = outcome.reportTelemetry;
 				this.scopeWarnings.push(...outcome.scopeWarnings);
 				this.resolvedMinimumScore = outcome.resolvedMinimumScore;
 			}
@@ -527,6 +608,9 @@ export class MonorepoPipeline extends ScanPipeline {
 	get workerOutcome(): ScanOutcome {
 		return {
 			kind: "monorepo",
+			...(this.codeGraphs.length > 0
+				? { codeGraph: encodeCodeGraph(mergeCodeGraphs(this.codeGraphs)) }
+				: {}),
 			customRuleWarnings: this.result.customRuleWarnings,
 			moduleGraphs: this.result.moduleGraphs,
 			result: this.result.result,
@@ -534,6 +618,7 @@ export class MonorepoPipeline extends ScanPipeline {
 			bootstrapRoots: this.bootstrapRoots,
 			allFiles: this.allFiles,
 			subProjectOptOut: this.subProjectOptOut,
+			reportTelemetry: this.reportTelemetry,
 			scopeWarnings: this.scopeWarnings,
 			resolvedMinimumScore: this.resolvedMinimumScore,
 		};
@@ -571,8 +656,8 @@ export class MonorepoPipeline extends ScanPipeline {
 		if (this.options.skipOutput) {
 			return this;
 		}
-		const step: PipelineStep = () => {
-			return outputMonorepoResults(
+		const step: PipelineStep = () =>
+			outputMonorepoResults(
 				this.result,
 				this.resolvedMinimumScore,
 				this.targetPath,
@@ -580,7 +665,6 @@ export class MonorepoPipeline extends ScanPipeline {
 				this.scopeWarnings,
 				() => this.reportArtifact
 			);
-		};
 		this.steps.push(step);
 		this.outputStep = step;
 		return this;
@@ -595,11 +679,25 @@ export class SingleProjectPipeline extends ScanPipeline {
 	private reportProviders: ReportProvider[] = [];
 	private bootstrapRoots: string[] = [];
 	private cachedArtifact: ReportArtifact | undefined;
+	/** Set when the scan ran in a worker, which encodes the graph there. */
+	private encodedCodeGraph: EncodedCodeGraph | undefined;
+
+	/** Whether anything downstream reads the whole artifact. */
+	private get wantsArtifact(): boolean {
+		return this.options.interactive || this.options.format === "report-json";
+	}
 
 	/** The scan as one serializable document, built once on demand. */
 	get reportArtifact(): ReportArtifact {
 		if (!this.cachedArtifact) {
 			const { moduleGraph, files, result } = this.result;
+			// A worker scan leaves no context behind and sends the graph back
+			// encoded; otherwise it is built here when something reads it.
+			const codeGraph =
+				this.encodedCodeGraph ??
+				(this.wantsArtifact && this.context
+					? encodeCodeGraph(codeGraphFor(this.context))
+					: undefined);
 			this.cachedArtifact = buildReportArtifact({
 				targetPath: this.targetPath,
 				moduleGraph,
@@ -607,8 +705,10 @@ export class SingleProjectPipeline extends ScanPipeline {
 				files,
 				providers: this.reportProviders,
 				bootstrapRoots: this.bootstrapRoots,
+				...(codeGraph ? { codeGraph } : {}),
+				scanId: this.options.scanId,
 				sources: this.options.sources,
-				timings: this.options.timings,
+				traces: this.options.traces,
 				version: getCliVersion(),
 			});
 		}
@@ -618,10 +718,14 @@ export class SingleProjectPipeline extends ScanPipeline {
 	/** What the post-scan menu needs, without re-scanning. */
 	get interactiveArtifacts(): InteractiveArtifacts {
 		return {
-			buildReportHtml: () => buildHtmlReport(this.reportArtifact),
+			buildReportHtml: () =>
+				buildHtmlReport(this.reportArtifact, {
+					telemetry: this.reportTelemetry,
+				}),
 			moduleGraph: () => this.reportArtifact.graph,
 			printSummary: () => {
 				printConsoleReport(this.result.result, this.options.verbose, true);
+				this.printExtensionHint("menu");
 			},
 			result: this.result.result,
 		};
@@ -635,12 +739,14 @@ export class SingleProjectPipeline extends ScanPipeline {
 				targetPath: this.targetPath,
 				options: toScanOptions(this.options),
 				version: getCliVersion(),
+				wantsCodeGraph: true,
 			},
 			(outcome) => {
 				if (outcome.kind !== "single") {
 					throw new Error("unexpected scan outcome");
 				}
 				this.workerWarnings = outcome.customRuleWarnings;
+				this.encodedCodeGraph = outcome.codeGraph;
 				this.result = {
 					customRuleWarnings: outcome.customRuleWarnings,
 					files: outcome.files,
@@ -651,6 +757,7 @@ export class SingleProjectPipeline extends ScanPipeline {
 				};
 				this.reportProviders = outcome.reportProviders;
 				this.bootstrapRoots = outcome.bootstrapRoots;
+				this.reportTelemetry = outcome.reportTelemetry;
 				this.scopeWarnings.push(...outcome.scopeWarnings);
 				this.resolvedMinimumScore = outcome.resolvedMinimumScore;
 			}
@@ -661,12 +768,16 @@ export class SingleProjectPipeline extends ScanPipeline {
 	get workerOutcome(): ScanOutcome {
 		return {
 			kind: "single",
+			...(this.options.wantsCodeGraph
+				? { codeGraph: encodeCodeGraph(codeGraphFor(this.context)) }
+				: {}),
 			customRuleWarnings: this.result.customRuleWarnings,
 			files: this.result.files,
 			moduleGraph: this.result.moduleGraph,
 			reportProviders: this.reportProviders,
 			bootstrapRoots: this.bootstrapRoots,
 			result: this.result.result,
+			reportTelemetry: this.reportTelemetry,
 			schemaGraph: this.result.schemaGraph,
 			scopeWarnings: this.scopeWarnings,
 			resolvedMinimumScore: this.resolvedMinimumScore,
@@ -720,7 +831,9 @@ export class SingleProjectPipeline extends ScanPipeline {
 				this.rawOutput.diagnostics,
 				this.result.result,
 				this.context.files.length,
-				false
+				false,
+				performance.now() - this.startedAt,
+				this.rawOutput.suppressed
 			);
 		});
 		return this;
@@ -740,8 +853,8 @@ export class SingleProjectPipeline extends ScanPipeline {
 		if (this.options.skipOutput) {
 			return this;
 		}
-		const step: PipelineStep = () => {
-			return outputSingleProjectResults(
+		const step: PipelineStep = () =>
+			outputSingleProjectResults(
 				this.result,
 				this.resolvedMinimumScore,
 				this.targetPath,
@@ -749,7 +862,6 @@ export class SingleProjectPipeline extends ScanPipeline {
 				this.scopeWarnings,
 				() => this.reportArtifact
 			);
-		};
 		this.steps.push(step);
 		this.outputStep = step;
 		return this;

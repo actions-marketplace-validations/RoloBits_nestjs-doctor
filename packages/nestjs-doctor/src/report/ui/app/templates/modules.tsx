@@ -16,7 +16,12 @@ import { Badge } from "../atoms/badge.js";
 import { IconButton, TextButton } from "../atoms/button.js";
 import { Heading } from "../atoms/heading.js";
 import { Icon } from "../atoms/icon.js";
-import { moduleTimingLabel, moduleTimings } from "../lib/boot-timeline.js";
+import {
+	moduleTimingLabel,
+	moduleTimings,
+	traceIndexForModule,
+	traceViews,
+} from "../lib/boot-timeline.js";
 import { installFloatTip } from "../lib/float-tip.js";
 import {
 	endpointsOf,
@@ -30,7 +35,6 @@ import {
 	type MgNode,
 	ModulesCanvas,
 } from "../lib/modules-canvas.js";
-import { hookChipHtml } from "../lib/trace.js";
 import { useLatest } from "../lib/use-latest.js";
 import { CheckboxRow } from "../molecules/checkbox-row.js";
 import { EmptyState } from "../molecules/empty-state.js";
@@ -38,7 +42,7 @@ import { SearchField } from "../molecules/search-field.js";
 import { SidebarHeader, TreeToolbar } from "../molecules/sidebar-header.js";
 import { TreeRow } from "../molecules/tree-row.js";
 import { ZoomBar } from "../molecules/zoom-bar.js";
-import { BootView, focusBootTrace } from "./boot.js";
+import { BootView } from "./boot.js";
 
 const MG_DYNAMIC_TIPS: Record<string, string> = {
 	forRoot: "Configures the module once for the whole app",
@@ -66,10 +70,6 @@ const PROVIDER_NAME_RE = /Provider '([^']+)'/;
 
 function track(event: string): void {
 	(globalThis as { __ndTrack?: (e: string) => void }).__ndTrack?.(event);
-}
-
-function switchTab(name: string): void {
-	(globalThis as { switchTab?: (name: string) => void }).switchTab?.(name);
 }
 
 interface ModulesRegistry {
@@ -551,7 +551,6 @@ function WiringTree({
 				const sub = wiringChildren(d.dependencies);
 				return (
 					<li
-						// biome-ignore lint/suspicious/noArrayIndexKey: rows have no stable identity beyond their order
 						key={`${d.className}:${index}`}
 						style={{ paddingLeft: depth * 12 }}
 					>
@@ -927,6 +926,7 @@ export function ModulesTab({ report }: { report: ReportArtifact }) {
 	const graph = report.graph;
 	const [selectedName, setSelectedName] = useState<string | null>(null);
 	const modTimings = useMemo(() => moduleTimings(graph), [graph]);
+	const bootViews = useMemo(() => traceViews(graph), [graph]);
 	const timingLabelOf = (name: string): string => {
 		const timing = modTimings.get(name);
 		return timing ? moduleTimingLabel(timing) : "";
@@ -952,22 +952,25 @@ export function ModulesTab({ report }: { report: ReportArtifact }) {
 	const treeRef = useRef<HTMLDivElement>(null);
 	const infoPopRef = useRef<HTMLDivElement>(null);
 	const controllerRef = useRef<ModulesCanvas | null>(null);
+	// The dock's height lands after commit, so measure the canvas then.
+	useLayoutEffect(() => {
+		controllerRef.current?.resize();
+	}, [dockOpen, dockActive]);
 	const resizerRef = useResizer(sidebarRef, controllerRef);
 
-	const unusedProviders = useRef<Record<string, boolean> | null>(null);
-	if (unusedProviders.current === null) {
-		unusedProviders.current = {};
+	const unusedProviders = useMemo(() => {
+		const map: Record<string, boolean> = {};
 		for (const d of report.diagnostics) {
 			if (d.rule === "performance/no-unused-providers") {
 				const um = (d.message || "").match(PROVIDER_NAME_RE);
 				if (um) {
-					unusedProviders.current[um[1] as string] = true;
+					map[um[1] as string] = true;
 				}
 			}
 		}
-	}
+		return map;
+	}, [report]);
 
-	// biome-ignore lint/correctness/useExhaustiveDependencies: the controller mounts once for the page's lifetime
 	useLayoutEffect(() => {
 		const canvas = canvasRef.current;
 		const tooltipEl = tooltipRef.current;
@@ -1064,7 +1067,8 @@ export function ModulesTab({ report }: { report: ReportArtifact }) {
 		}
 		const onDocClick = (ev: Event) => {
 			const pop = infoPopRef.current;
-			if (pop && !pop.contains(ev.target as Node)) {
+			const target = ev.target as Element;
+			if (pop && !(pop.contains(target) || target.closest("#mg-info"))) {
 				setInfoOpen(false);
 			}
 		};
@@ -1076,6 +1080,7 @@ export function ModulesTab({ report }: { report: ReportArtifact }) {
 	const nodeMap = controller ? controller.nodeMap : {};
 	const importers = controller ? controller.importers : {};
 	const selected = selectedName ? (nodeMap[selectedName] ?? null) : null;
+	const dockTraceIdx = selected ? traceIndexForModule(bootViews, selected) : 0;
 
 	const byProject: Record<string, MgNode[]> = {};
 	for (const n of nodes) {
@@ -1129,7 +1134,11 @@ export function ModulesTab({ report }: { report: ReportArtifact }) {
 
 	return (
 		<>
-			<div id="mg-sidebar" ref={sidebarRef}>
+			<div
+				className={selected ? "mg-detail-open" : undefined}
+				id="mg-sidebar"
+				ref={sidebarRef}
+			>
 				<div className="schema-sidebar-sticky">
 					<SidebarHeader
 						count={projectNames.length}
@@ -1284,8 +1293,8 @@ export function ModulesTab({ report }: { report: ReportArtifact }) {
 						id="detail-badges"
 						onClick={(ev) => {
 							if ((ev.target as Element).closest("#detail-timings-btn")) {
-								switchTab("boot");
-								focusBootTrace(selected?.initTimings?.[0]?.name);
+								setDockActive("trace");
+								setDockOpen(true);
 							}
 						}}
 					>
@@ -1311,15 +1320,6 @@ export function ModulesTab({ report }: { report: ReportArtifact }) {
 									{timingLabelOf(selected.name)} · trace ▸
 								</Badge>
 							)}
-						{selected && graph.timingsAvailable && (
-							<span
-								// biome-ignore lint/security/noDangerouslySetInnerHtml: hook chips come from the tested trace module
-								dangerouslySetInnerHTML={{
-									__html: hookChipHtml(selected.hookTimings),
-								}}
-								style={{ display: "contents" }}
-							/>
-						)}
 					</div>
 					<div className="filepath" id="detail-path">
 						{selected
@@ -1372,7 +1372,7 @@ export function ModulesTab({ report }: { report: ReportArtifact }) {
 								<ProvidersSection
 									n={selected}
 									report={report}
-									unusedProviders={unusedProviders.current}
+									unusedProviders={unusedProviders}
 								/>
 								{selected.imports.length > 0 && (
 									<>
@@ -1555,11 +1555,9 @@ export function ModulesTab({ report }: { report: ReportArtifact }) {
 							) {
 								setDockActive(tabEl.dataset.dockTab as string);
 								setDockOpen(true);
-								controllerRef.current?.resize();
 								return;
 							}
 							setDockOpen((prev) => !prev);
-							controllerRef.current?.resize();
 						}}
 					>
 						<span
@@ -1603,7 +1601,6 @@ export function ModulesTab({ report }: { report: ReportArtifact }) {
 								<div
 									className="mg-problem-row mg-problem-linked"
 									data-module={row.module}
-									// biome-ignore lint/suspicious/noArrayIndexKey: findings have no stable identity beyond their order
 									key={`${row.diag.rule}:${index}`}
 									onClick={() => {
 										track("module_opened_from_finding");
@@ -1621,20 +1618,27 @@ export function ModulesTab({ report }: { report: ReportArtifact }) {
 						)}
 					</div>
 					<div className="boot-dock-body" data-active={dockActive}>
-						<BootView
-							compact
-							focusModule={selectedName}
-							graph={graph}
-							onSelectSpan={(span) => {
-								if (graph.modules.some((m) => m.name === span.module)) {
-									selectRef.current(span.module, true);
-								}
-							}}
-						/>
+						{dockTraceIdx === -1 ? (
+							<div className="boot-dock-empty">
+								No boot timings cover {selected?.project || "this module"}
+							</div>
+						) : (
+							<BootView
+								compact
+								focusModule={selectedName}
+								graph={graph}
+								onSelectSpan={(span) => {
+									if (graph.modules.some((m) => m.name === span.module)) {
+										selectRef.current(span.module, true);
+									}
+								}}
+								traceIndex={dockTraceIdx}
+							/>
+						)}
 					</div>
 				</div>
 				<div
-					className={infoOpen ? "visible" : undefined}
+					className={infoOpen ? "modal-panel visible" : "modal-panel"}
 					id="mg-info-pop"
 					ref={infoPopRef}
 				>

@@ -1,24 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { formatMs, hookChipHtml } from "../../src/report/ui/app/lib/trace.js";
-
-describe("hookChipHtml", () => {
-	it("renders a chip with the hook label and duration", () => {
-		const html = hookChipHtml([{ hook: "onModuleInit", ms: 120.4 }]);
-		expect(html).toContain("mg-trace-hook");
-		expect(html).toContain("120ms init");
-	});
-
-	it("marks per-instance totals with a count", () => {
-		const html = hookChipHtml([{ hook: "onModuleInit", ms: 39, count: 2 }]);
-		expect(html).toContain("×2");
-		expect(html).toContain("across 2 instances");
-	});
-
-	it("renders nothing without hooks", () => {
-		expect(hookChipHtml(undefined)).toBe("");
-		expect(hookChipHtml([])).toBe("");
-	});
-});
+import {
+	formatMs,
+	PALETTE,
+	phaseParts,
+} from "../../src/report/ui/app/lib/trace.js";
 
 describe("formatMs", () => {
 	it("rounds to the nearest millisecond at 10ms and above", () => {
@@ -41,5 +26,41 @@ describe("formatMs", () => {
 
 	it("rounds 9.96ms up cleanly rather than printing 10.0ms", () => {
 		expect(formatMs(9.96)).toBe("10ms");
+	});
+});
+
+describe("phaseParts without a create marker", () => {
+	it("merges construction into the init segment when only moduleInitMs is marked", () => {
+		const parts = phaseParts({
+			phases: { moduleInitMs: 170.1 },
+			startupMs: 170.8,
+		});
+		expect(parts.length).toBeGreaterThanOrEqual(2);
+		expect(parts.reduce((sum, p) => sum + p.ms, 0)).toBeCloseTo(170.8, 6);
+		const head = parts[0];
+		expect(head?.ms).toBeCloseTo(170.1, 6);
+		expect(head?.label).not.toBe("create");
+		expect(head?.gloss).toBe("build + init hooks");
+		expect(parts.at(-1)?.label).toBe("bootstrap + listen");
+	});
+
+	it("renders one grey whole-boot segment when only startupMs is known", () => {
+		for (const phases of [{}, undefined]) {
+			const parts = phaseParts({ phases, startupMs: 170.8 });
+			expect(parts).toHaveLength(1);
+			expect(parts[0]).toMatchObject({
+				gloss: "whole boot",
+				ms: 170.8,
+				rgb: PALETTE.grey,
+			});
+		}
+	});
+
+	it("merges everything before initMs when the earlier markers are missing", () => {
+		const parts = phaseParts({ phases: { initMs: 84 }, startupMs: 92 });
+		expect(parts.map((p) => [p.label, p.ms])).toEqual([
+			["create + hooks", 84],
+			["listen", 8],
+		]);
 	});
 });

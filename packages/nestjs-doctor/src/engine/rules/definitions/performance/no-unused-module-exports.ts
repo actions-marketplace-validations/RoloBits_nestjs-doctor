@@ -1,6 +1,9 @@
 import type { ClassDeclaration } from "ts-morph";
+import {
+	collectCustomProviderClasses,
+	isTestFile,
+} from "../../../graph/custom-providers.js";
 import type { ModuleNode } from "../../../graph/module-graph.js";
-import { hasDecorator } from "../../../nest-class-inspector.js";
 import type { ProjectRule, ProjectRuleContext } from "../../types.js";
 
 const QUOTES = /^['"`]|['"`]$/g;
@@ -39,7 +42,7 @@ function resolveConsumers(
 		(other) => other.name !== mod.name
 	);
 
-	if (mod.classDeclaration && hasDecorator(mod.classDeclaration, "Global")) {
+	if (mod.isGlobal) {
 		return all;
 	}
 
@@ -73,6 +76,12 @@ export const noUnusedModuleExports: ProjectRule = {
 			}
 		}
 
+		// Custom-provider uses per production file, walked once.
+		const { usesByFile } = collectCustomProviderClasses(
+			context.project,
+			context.files.filter((filePath) => !isTestFile(filePath))
+		);
+
 		for (const mod of context.moduleGraph.modules.values()) {
 			if (mod.exports.length === 0) {
 				continue;
@@ -92,6 +101,26 @@ export const noUnusedModuleExports: ProjectRule = {
 						classesByName.get(name);
 					if (cls) {
 						collectInjectedNames(cls, usedProviders);
+					}
+				}
+
+				// A custom provider's target, alias or `inject` entry, by text or
+				// resolved name, counts as used, and so does what the target injects.
+				for (const filePath of [
+					...(consumer.filePaths ?? [consumer.filePath]),
+					...Object.keys(consumer.dynamicByFile ?? {}),
+				]) {
+					const sourceFile = context.project.getSourceFile(filePath);
+					const uses = sourceFile && usesByFile.get(sourceFile);
+					if (!uses) {
+						continue;
+					}
+					for (const implName of uses) {
+						usedProviders.add(implName);
+						const implClass = classesByName.get(implName);
+						if (implClass) {
+							collectInjectedNames(implClass, usedProviders);
+						}
 					}
 				}
 

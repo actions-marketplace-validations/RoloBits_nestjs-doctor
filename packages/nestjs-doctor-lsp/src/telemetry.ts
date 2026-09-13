@@ -89,7 +89,7 @@ function readStored(file: string): StoredConfig | undefined {
 		const parsed = JSON.parse(readFileSync(file, "utf-8")) as StoredConfig;
 		return parsed.anonymousId && parsed.salt ? parsed : undefined;
 	} catch {
-		return;
+		// A missing or corrupt store means no stored id.
 	}
 }
 
@@ -97,6 +97,34 @@ export interface LspIdentity {
 	anonymousId: string;
 	/** Absent under a known CI provider. */
 	projectId?: string;
+}
+
+/** Records that the extension has run, so the CLI stops pointing at it. */
+export function markLspSeen(env: NodeJS.ProcessEnv = process.env): void {
+	const file = join(configDir(env), "hints.json");
+	let existing: Record<string, string> = {};
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(file, "utf-8"));
+		if (
+			typeof parsed === "object" &&
+			parsed !== null &&
+			!Array.isArray(parsed)
+		) {
+			existing = parsed as Record<string, string>;
+		}
+	} catch {
+		// A missing or corrupt store means no hints.
+	}
+	try {
+		mkdirSync(dirname(file), { recursive: true });
+		writeFileSync(
+			file,
+			`${JSON.stringify({ ...existing, lsp: new Date().toISOString().slice(0, 10) }, null, 2)}\n`,
+			"utf-8"
+		);
+	} catch {
+		// A read-only home keeps no hints.
+	}
 }
 
 /** Reads the id the CLI wrote, creating it when this is the first tool to run. */
@@ -135,11 +163,14 @@ export function resolveIdentity(
 		anonymousId: randomUUID(),
 		salt: randomUUID(),
 	};
-	try {
-		mkdirSync(dirname(file), { recursive: true });
-		writeFileSync(file, `${JSON.stringify(created, null, 2)}\n`, "utf-8");
-	} catch {
-		// A read-only home reports a per-run id.
+	// A debug run sends nothing, so it leaves no store behind either.
+	if (!isSet(env.NESTJS_DOCTOR_TELEMETRY_DEBUG)) {
+		try {
+			mkdirSync(dirname(file), { recursive: true });
+			writeFileSync(file, `${JSON.stringify(created, null, 2)}\n`, "utf-8");
+		} catch {
+			// A read-only home reports a per-run id.
+		}
 	}
 
 	return {
@@ -206,24 +237,21 @@ req.end(body);
 export function sendLspEvent(
 	event: string,
 	distinctId: string,
-	properties: Record<string, unknown>
+	properties: Record<string, unknown>,
+	env: NodeJS.ProcessEnv = process.env
 ): void {
 	if (!POSTHOG_KEY) {
+		return;
+	}
+	const body = { event, distinct_id: distinctId, properties };
+	if (isSet(env.NESTJS_DOCTOR_TELEMETRY_DEBUG)) {
+		process.stderr.write(`${JSON.stringify(body, null, 2)}\n`);
 		return;
 	}
 	try {
 		const child = spawn(
 			process.execPath,
-			[
-				"-e",
-				CHILD_SCRIPT,
-				JSON.stringify({
-					api_key: POSTHOG_KEY,
-					event,
-					distinct_id: distinctId,
-					properties,
-				}),
-			],
+			["-e", CHILD_SCRIPT, JSON.stringify({ api_key: POSTHOG_KEY, ...body })],
 			{ detached: true, stdio: "ignore", windowsHide: true }
 		);
 		child.on("error", () => {

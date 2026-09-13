@@ -280,6 +280,13 @@ function allTreeIds(schema: SerializedSchemaGraph): string[] {
 	return ids;
 }
 
+const registry: { select?: (name: string) => void } = {};
+
+/** Deep link from another tab: land on one entity after switchTab("schema"). */
+export function openSchemaEntity(name: string): void {
+	registry.select?.(name);
+}
+
 export function SchemaTab({ report }: { report: ReportArtifact }) {
 	const schema = report.schema;
 	const [selected, setSelected] = useState<string | null>(null);
@@ -334,7 +341,6 @@ export function SchemaTab({ report }: { report: ReportArtifact }) {
 		}
 	};
 
-	// biome-ignore lint/correctness/useExhaustiveDependencies: the controller mounts once for the page's lifetime
 	useEffect(() => {
 		const canvas = canvasRef.current;
 		const tooltipEl = tooltipRef.current;
@@ -419,6 +425,14 @@ export function SchemaTab({ report }: { report: ReportArtifact }) {
 		}
 		controllerRef.current?.selectFromSidebar(name);
 	};
+
+	const selectRef = useLatest(selectEntity);
+	useEffect(() => {
+		registry.select = (name) => selectRef.current(name);
+		return () => {
+			registry.select = undefined;
+		};
+	}, [selectRef]);
 
 	const schemaDiags = report.diagnostics.filter((d) => d.category === "schema");
 	const entityNames = new Set(schema.entities.map((e) => e.name));
@@ -705,11 +719,7 @@ export function SchemaTab({ report }: { report: ReportArtifact }) {
 								schemaDiags.map((sd, index) => {
 									const entityName = diagEntity(sd.message);
 									return (
-										<div
-											className="sd-item"
-											// biome-ignore lint/suspicious/noArrayIndexKey: diagnostics have no stable identity beyond their order
-											key={`${sd.rule}:${index}`}
-										>
+										<div className="sd-item" key={`${sd.rule}:${index}`}>
 											<span
 												className="sev-dot"
 												style={{ background: SEV_VAR[sd.severity] }}

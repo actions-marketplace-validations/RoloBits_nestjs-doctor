@@ -53,7 +53,10 @@ const requestFixture = (): ScanWorkerRequest =>
 	}) as unknown as ScanWorkerRequest;
 
 const outcomeFixture = (): ScanOutcome =>
-	({ kind: "single", customRuleWarnings: [] }) as unknown as ScanOutcome;
+	({
+		kind: "single",
+		customRuleWarnings: [],
+	}) as unknown as ScanOutcome;
 
 const delegateInput = (
 	overrides: Partial<CanDelegateInput> = {}

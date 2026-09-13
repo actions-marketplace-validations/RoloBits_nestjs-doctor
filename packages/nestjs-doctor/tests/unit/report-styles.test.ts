@@ -14,6 +14,47 @@ describe("report styles", () => {
 		expect(css).toContain("repeating-linear-gradient(45deg");
 	});
 
+	it("weaves the guide under a zero-length phase", () => {
+		expect(css).toContain(".boot-guide-zero {");
+	});
+
+	it("weaves the widened stretch of the axis", () => {
+		expect(css).toContain(".boot-axis-warp {");
+	});
+
+	it("dashes a widened phase and stacks the name over the time", () => {
+		expect(css).toContain(".boot-phase-inflated {");
+		expect(css).toContain("flex-direction: column");
+		expect(css).toContain(
+			".boot-phase-ms { color: rgba(255,255,255,0.55); overflow: hidden; text-overflow: ellipsis; }"
+		);
+	});
+
+	it("styles the trace picker and the dock's empty note", () => {
+		expect(css).toContain(".boot-trace-picker {");
+		expect(css).toContain(".boot-dock-empty {");
+		expect(css).toContain(".boot-hook-stray {");
+	});
+
+	it("aligns the lanes with the scrolled rows and labels the guides", () => {
+		expect(css).toContain(
+			".boot-scroll { flex: 1; overflow: auto; min-height: 0; outline: none; scrollbar-gutter: stable; }"
+		);
+		expect(css).toContain(
+			"overflow: hidden; scrollbar-gutter: stable; padding: 8px 14px 6px;"
+		);
+		expect(css).toContain("border-left: 2px dotted;");
+		expect(css).toContain(".boot-guide-ms {");
+		expect(css).toContain("position: sticky");
+	});
+
+	it("weaves the endpoints map, pile and flight", () => {
+		expect(css).toContain(".dc-card {");
+		expect(css).toContain(".dc-wire {");
+		expect(css).toContain("@keyframes dc-fly {");
+		expect(css).toContain(".dc-side-hidden {");
+	});
+
 	it("concatenates every sheet", () => {
 		for (const marker of [
 			":root {",
@@ -23,7 +64,7 @@ describe("report styles", () => {
 			".summary-grid {",
 			".playground-editor {",
 			"#schema-sidebar {",
-			".ep-code-panel {",
+			"#endpoints-sidebar {",
 		]) {
 			expect(css).toContain(marker);
 		}

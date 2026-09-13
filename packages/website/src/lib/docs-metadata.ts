@@ -5,12 +5,17 @@ export const DOCS_PAGES: Record<string, PageCopy> = {
 	"/docs": {
 		title: "What is nestjs-doctor?",
 		description:
-			"Diagnostic CLI tool that scans NestJS codebases and produces a health score across security, correctness, architecture, performance, and schema.",
+			"The deterministic NestJS devtool that catches AI mistakes. Static analysis that scans a NestJS codebase and produces a health score across security, correctness, architecture, performance, and schema.",
 	},
 	"/docs/nest-devtools-alternative": {
 		title: "NestJS Doctor vs Nest Devtools",
 		description:
 			"Both draw a NestJS module graph. Nest Devtools boots your app; nestjs-doctor reads your source, adds 52 rules, an ER diagram and a CI gate, and is MIT licensed.",
+	},
+	"/docs/nestjs-eslint-plugins": {
+		title: "NestJS Doctor vs ESLint plugins",
+		description:
+			"What the NestJS ESLint plugins and oxlint check, what a project-scoped scan sees that a file-scoped lint rule cannot, and where the two overlap rule for rule.",
 	},
 	"/docs/setup": {
 		title: "Quickstart",
@@ -71,6 +76,11 @@ export const DOCS_PAGES: Record<string, PageCopy> = {
 		title: "Custom rule configuration",
 		description:
 			"Wire custom rules into a nestjs-doctor scan: customRulesDir, how rule files load, custom/ id prefixing, and the surfaces a rule's findings appear on.",
+	},
+	"/docs/telemetry": {
+		title: "Telemetry",
+		description:
+			"Every field a nestjs-doctor scan reports, what it never sends, how the install and CI ids are built, the three ways to turn it off, and how to print the payload instead of sending it.",
 	},
 	"/docs/ci": {
 		title: "GitHub Actions setup",

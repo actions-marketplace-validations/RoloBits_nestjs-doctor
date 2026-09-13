@@ -27,6 +27,18 @@ export function scanTelemetryEnabled(
 	return config?.telemetry !== false;
 }
 
+/** Whether a generated report may embed its beacon: the scan gate plus `report.telemetry`. */
+export function reportTelemetryEnabled(
+	flag: boolean,
+	config: NestjsDoctorConfig | undefined,
+	env: NodeJS.ProcessEnv = process.env
+): boolean {
+	return (
+		scanTelemetryEnabled(flag, config, env, "always") &&
+		config?.report?.telemetry !== false
+	);
+}
+
 /** Runs in a detached child, so a stalled network cannot hold the scan open. */
 const CHILD_SCRIPT = `
 const body = process.argv[1];
@@ -40,35 +52,39 @@ req.on("timeout", () => req.destroy());
 req.end(body);
 `;
 
-/** Hands the payload to a detached child, so the scan never waits on the network. */
+/** Hands the payload to a detached child and returns whether one was started. */
 export function sendScanTelemetry(
 	payload: ScanPayload,
-	distinctId: string
-): void {
+	distinctId: string,
+	env: NodeJS.ProcessEnv = process.env
+): boolean {
 	if (!POSTHOG_KEY) {
-		return;
+		return false;
+	}
+
+	const body = {
+		event: "scan_completed",
+		distinct_id: distinctId,
+		properties: payload,
+	};
+	if (isSet(env.NESTJS_DOCTOR_TELEMETRY_DEBUG)) {
+		process.stderr.write(`${JSON.stringify(body, null, 2)}\n`);
+		return false;
 	}
 
 	try {
 		const child = spawn(
 			process.execPath,
-			[
-				"-e",
-				CHILD_SCRIPT,
-				JSON.stringify({
-					api_key: POSTHOG_KEY,
-					event: "scan_completed",
-					distinct_id: distinctId,
-					properties: payload,
-				}),
-			],
+			["-e", CHILD_SCRIPT, JSON.stringify({ api_key: POSTHOG_KEY, ...body })],
 			{ detached: true, stdio: "ignore", windowsHide: true }
 		);
 		child.on("error", () => {
 			// Best-effort; a scan never fails because of it.
 		});
 		child.unref();
+		return true;
 	} catch {
 		// Same for an environment that cannot spawn.
+		return false;
 	}
 }

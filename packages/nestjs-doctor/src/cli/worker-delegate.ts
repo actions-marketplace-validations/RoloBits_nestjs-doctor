@@ -1,6 +1,7 @@
 import { stat } from "node:fs/promises";
 import { Worker } from "node:worker_threads";
 import type { ReportProvider } from "../common/artifact.js";
+import type { EncodedCodeGraph } from "../common/code-graph-codec.js";
 import type { DiagnoseResult } from "../common/result.js";
 import type { MonorepoInfo } from "../engine/project-detector.js";
 import type { EngineResult, MonorepoEngineResult } from "../engine/scanner.js";
@@ -13,6 +14,8 @@ export interface ScanWorkerRequest {
 	options: ScanOptions;
 	targetPath: string;
 	version: string;
+	/** Whether the worker also captures the code graph for the report artifact. */
+	wantsCodeGraph: boolean;
 }
 
 /** Worker → main. Progress ticks, then one outcome or one failure. */
@@ -25,6 +28,7 @@ export type ScanWorkerMessage =
 export type ScanOutcome =
 	| {
 			kind: "monorepo";
+			codeGraph?: EncodedCodeGraph;
 			customRuleWarnings: string[];
 			moduleGraphs: MonorepoEngineResult["moduleGraphs"];
 			result: MonorepoEngineResult["result"];
@@ -32,17 +36,20 @@ export type ScanOutcome =
 			bootstrapRoots: string[];
 			allFiles: string[];
 			subProjectOptOut: boolean;
+			reportTelemetry: boolean;
 			scopeWarnings: string[];
 			resolvedMinimumScore?: number;
 	  }
 	| {
 			kind: "single";
+			codeGraph?: EncodedCodeGraph;
 			customRuleWarnings: string[];
 			files: string[];
 			moduleGraph: EngineResult["moduleGraph"];
 			reportProviders: ReportProvider[];
 			bootstrapRoots: string[];
 			result: DiagnoseResult;
+			reportTelemetry: boolean;
 			schemaGraph: EngineResult["schemaGraph"];
 			scopeWarnings: string[];
 			resolvedMinimumScore?: number;

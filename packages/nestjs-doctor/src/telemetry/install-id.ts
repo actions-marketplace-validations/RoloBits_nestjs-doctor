@@ -2,13 +2,15 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { dirname, join } from "node:path";
-import { detectKnownCiProvider } from "./environment.js";
+import { detectKnownCiProvider, isSet } from "./environment.js";
 
 interface TelemetryIdentity {
 	/** Stable per-install id, or a shared one per provider in CI. */
 	anonymousId: string;
 	/** Per-project, salted with a value that never leaves the machine. Absent under a known CI provider. */
 	projectId?: string;
+	/** Whether the id is the one on disk. False in CI and when the home is unwritable. */
+	stored: boolean;
 }
 
 interface StoredConfig {
@@ -38,12 +40,39 @@ export function configDir(env: NodeJS.ProcessEnv = process.env): string {
 	);
 }
 
-/**
- * One id per CI provider, shared by every runner.
- */
+const CI_REPO_SALT = "nestjs-doctor.ci.v1";
+
+/** The variables each provider uses for its numeric repository id. */
+const CI_REPO_VARS: Record<string, readonly string[]> = {
+	github: ["GITHUB_REPOSITORY_ID"],
+	gitlab: ["CI_PROJECT_ID"],
+};
+
+function repoKey(provider: string, env: NodeJS.ProcessEnv): string | undefined {
+	for (const name of CI_REPO_VARS[provider] ?? []) {
+		const raw = env[name]?.trim().toLowerCase();
+		if (raw) {
+			return raw;
+		}
+	}
+	return undefined;
+}
+
+/** One id per repository, or one per provider that names none. */
 function ciIdentity(env: NodeJS.ProcessEnv): string | undefined {
 	const provider = detectKnownCiProvider(env);
-	return provider ? `ci.${provider}` : undefined;
+	if (!provider) {
+		return undefined;
+	}
+	const repo = repoKey(provider, env);
+	if (!repo) {
+		return `ci.${provider}`;
+	}
+	const hash = createHash("sha256")
+		.update(`${CI_REPO_SALT}:${repo}`)
+		.digest("hex")
+		.slice(0, 16);
+	return `ci.${provider}.${hash}`;
 }
 
 const readConfig = (file: string): StoredConfig | undefined => {
@@ -51,9 +80,48 @@ const readConfig = (file: string): StoredConfig | undefined => {
 		const parsed = JSON.parse(readFileSync(file, "utf-8")) as StoredConfig;
 		return parsed.anonymousId && parsed.salt ? parsed : undefined;
 	} catch {
-		return;
+		// A missing or corrupt store means no stored id.
 	}
 };
+
+/** One-time notices this install has already seen, keyed by name. */
+export function readHints(
+	env: NodeJS.ProcessEnv = process.env
+): Record<string, string> {
+	try {
+		const parsed: unknown = JSON.parse(
+			readFileSync(join(configDir(env), "hints.json"), "utf-8")
+		);
+		return typeof parsed === "object" &&
+			parsed !== null &&
+			!Array.isArray(parsed)
+			? (parsed as Record<string, string>)
+			: {};
+	} catch {
+		// A missing or corrupt store means no hints.
+		return {};
+	}
+}
+
+/** Records a one-time notice. Returns whether the write landed: false on a read-only home. */
+export function markHint(
+	name: "extension" | "lsp",
+	env: NodeJS.ProcessEnv = process.env
+): boolean {
+	const file = join(configDir(env), "hints.json");
+	const hints = {
+		...readHints(env),
+		[name]: new Date().toISOString().slice(0, 10),
+	};
+	try {
+		mkdirSync(dirname(file), { recursive: true });
+		writeFileSync(file, `${JSON.stringify(hints, null, 2)}\n`, "utf-8");
+		return true;
+	} catch {
+		// A read-only home keeps no hints.
+		return false;
+	}
+}
 
 /** Reads the install id and salt, creating them on first run. */
 export function resolveIdentity(
@@ -76,7 +144,7 @@ export function resolveIdentity(
 	if (ci) {
 		// No project id in CI: any salt shipped in the package makes a
 		// runner's checkout path guessable.
-		return { anonymousId: ci };
+		return { anonymousId: ci, stored: false };
 	}
 
 	const file = join(configDir(env), "telemetry.json");
@@ -86,6 +154,7 @@ export function resolveIdentity(
 		return {
 			anonymousId: existing.anonymousId,
 			projectId: salted(existing.salt),
+			stored: true,
 		};
 	}
 
@@ -94,15 +163,21 @@ export function resolveIdentity(
 		salt: randomUUID(),
 	};
 
-	try {
-		mkdirSync(dirname(file), { recursive: true });
-		writeFileSync(file, `${JSON.stringify(created, null, 2)}\n`, "utf-8");
-	} catch {
-		// A read-only home reports a per-run id.
+	let stored = false;
+	// A debug run sends nothing, so it leaves no store behind either.
+	if (!isSet(env.NESTJS_DOCTOR_TELEMETRY_DEBUG)) {
+		try {
+			mkdirSync(dirname(file), { recursive: true });
+			writeFileSync(file, `${JSON.stringify(created, null, 2)}\n`, "utf-8");
+			stored = true;
+		} catch {
+			// A read-only home reports a per-run id.
+		}
 	}
 
 	return {
 		anonymousId: created.anonymousId,
 		projectId: salted(created.salt),
+		stored,
 	};
 }

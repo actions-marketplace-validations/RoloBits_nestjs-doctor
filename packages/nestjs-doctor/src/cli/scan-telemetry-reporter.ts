@@ -8,6 +8,7 @@ import { actionContext, generatedIn } from "../telemetry/environment.js";
 import { resolveIdentity } from "../telemetry/install-id.js";
 import {
 	buildScanPayload,
+	type PayloadOutputFormat,
 	readConfigFacts,
 } from "../telemetry/scan-telemetry.js";
 import { scanTelemetryEnabled, sendScanTelemetry } from "../telemetry/send.js";
@@ -17,25 +18,32 @@ import { getCliVersion } from "./output.js";
 export interface ScanTelemetryInput {
 	blocking: BlockingLevel;
 	diagnostics: Diagnostic[];
+	/** Injectable for tests; defaults to the real environment. */
+	env?: NodeJS.ProcessEnv;
 	fileCount: number;
 	/** Injectable for tests; defaults to the compiled-in gating. */
 	isEnabled?: typeof scanTelemetryEnabled;
 	monorepo: boolean;
 	optionsTelemetry: boolean;
+	outputFormat: PayloadOutputFormat;
 	/** Injectable for tests; defaults to the real install-id resolver. */
 	resolveIdentityFn?: typeof resolveIdentity;
 	result: DiagnoseResult;
 	scanConfig: ScanConfig | undefined;
+	scanId: string;
 	scopeRequested: ScopeMode;
 	/** Injectable for tests; defaults to the detached-child sender. */
 	send?: typeof sendScanTelemetry;
 	subProjectOptOut: boolean;
+	/** Inline-directive suppression counts, keyed by rule id. */
+	suppressed: Record<string, number>;
 	targetPath: string;
+	totalMs: number;
 }
 
 /**
- * Reports the scan anonymously. A failure here leaves the scan untouched,
- * and the network call runs in a detached child.
+ * Reports the scan anonymously from a detached child. A failure here leaves the
+ * scan untouched.
  */
 export const reportScanTelemetry = (input: ScanTelemetryInput): void => {
 	const isEnabled = input.isEnabled ?? scanTelemetryEnabled;
@@ -45,9 +53,11 @@ export const reportScanTelemetry = (input: ScanTelemetryInput): void => {
 	) {
 		return;
 	}
+	const env = input.env ?? process.env;
 	try {
 		const identity = (input.resolveIdentityFn ?? resolveIdentity)(
-			input.targetPath
+			input.targetPath,
+			env
 		);
 		const scanConfig = input.scanConfig as ScanConfig;
 		const enabled = new Set(
@@ -59,7 +69,7 @@ export const reportScanTelemetry = (input: ScanTelemetryInput): void => {
 		);
 		(input.send ?? sendScanTelemetry)(
 			buildScanPayload({
-				action: actionContext(),
+				action: actionContext(env),
 				blocking: input.blocking,
 				config: readConfigFacts(scanConfig.config),
 				customRulesLoaded: scanConfig.combinedRules.filter((rule) =>
@@ -76,11 +86,15 @@ export const reportScanTelemetry = (input: ScanTelemetryInput): void => {
 				monorepo: input.monorepo,
 				nestVersion: input.result.project.nestVersion,
 				orm: input.result.project.orm,
+				outputFormat: input.outputFormat,
 				projectId: identity.projectId,
 				ruleErrors: input.result.ruleErrors,
+				scanId: input.scanId,
 				scopeRequested: input.scopeRequested,
 				score: input.result.score,
-				source: generatedIn(),
+				source: generatedIn(env),
+				suppressed: input.suppressed,
+				totalMs: input.totalMs,
 				version: getCliVersion(),
 			}),
 			identity.anonymousId

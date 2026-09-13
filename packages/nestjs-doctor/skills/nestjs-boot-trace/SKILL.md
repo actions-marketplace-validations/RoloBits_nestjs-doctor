@@ -80,6 +80,8 @@ environment check or a separate entry point rather than shipping it.
 npx nestjs-doctor@latest . --report --timings nestjs-doctor-timings.json
 ```
 
+A monorepo boots once per entry point. Instrument each `main.ts`, keep one dump per app, and pass them together, labelled when a name helps: `--timings nestjs-doctor-timings.json,worker=worker-timings.json`. Each dump becomes its own trace in the report.
+
 Relative paths resolve against the scanned directory. Without `--report` the
 flag is ignored, with a warning. A missing file, invalid JSON, or a dump
 without `initTime` each warn on stderr and still render the report, so check
@@ -90,8 +92,14 @@ stderr before trusting an empty trace.
 Each class's time includes waiting on its own dependencies. A shared slow
 dependency therefore counts again in every class that awaits it.
 
+The init and bootstrap segments split where the first
+`onApplicationBootstrap` hook starts; a dump without hook offsets shows one
+merged hooks segment.
+
 Read down a cascade until the number drops. The class where it drops owns the
-time. If `UsersService` reads 120ms and the `SlowService` it injects reads 119ms,
+time. Nest clocks each class from its own load start, so the first stretch of
+the build phase (the module scan) has no bars, and a controller's bar draws
+after its slowest dependency. If `UsersService` reads 120ms and the `SlowService` it injects reads 119ms,
 `SlowService` owns it.
 
 A module node shows the build of its slowest class, never a sum across

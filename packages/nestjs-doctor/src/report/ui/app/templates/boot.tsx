@@ -8,11 +8,14 @@ import { hoverCardData } from "../lib/boot-hover.js";
 import { hoverAnchor, placeHoverCard, timeAt } from "../lib/boot-pointer.js";
 import {
 	type BootSpan,
+	type BootTraceView,
 	type BootWindow,
 	buildBootTimeline,
 	expandableIds,
 	rowsHtml,
 	slowestSpanId,
+	traceViews,
+	u,
 	windowAround,
 } from "../lib/boot-timeline.js";
 import { cssAttr } from "../lib/escape.js";
@@ -36,6 +39,8 @@ interface BootViewProps {
 	graph: SerializedModuleGraph;
 	/** Fires with the span whenever a class row is selected. */
 	onSelectSpan?: (span: BootSpan) => void;
+	/** Pins the view to one trace and hides the picker. */
+	traceIndex?: number;
 }
 
 function toggled(set: ReadonlySet<string>, key: string): Set<string> {
@@ -77,8 +82,16 @@ export function BootView({
 	focusModule,
 	graph,
 	onSelectSpan,
+	traceIndex,
 }: BootViewProps) {
-	const timeline = useMemo(() => buildBootTimeline(graph), [graph]);
+	const views = useMemo<BootTraceView[]>(() => traceViews(graph), [graph]);
+	const [ownIdx, setOwnIdx] = useState(0);
+	const activeIdx = Math.min(traceIndex ?? ownIdx, views.length - 1);
+	const view = views[activeIdx];
+	const timeline = useMemo(
+		() => (view ? buildBootTimeline(view.graph) : null),
+		[view]
+	);
 	const [win, setWin] = useState<BootWindow>({
 		from: 0,
 		to: timeline?.maxMs ?? 1,
@@ -109,6 +122,7 @@ export function BootView({
 		y: number;
 	} | null>(null);
 	const pendingScrollRef = useRef<string | null>(null);
+	const pendingFocusRef = useRef<string | null>(null);
 
 	const timelineRef = useLatest(timeline);
 	const selectedIdRef = useLatest(selectedId);
@@ -124,18 +138,35 @@ export function BootView({
 		const named = className
 			? [...t.byId.values()].find((s) => s.name === className)
 			: undefined;
+		if (className && !named && traceIndex === undefined) {
+			const other = views.findIndex(
+				(v, i) =>
+					i !== activeIdx &&
+					Object.values(v.graph.timingsTrace ?? {}).some(
+						(n) => n.name === className
+					)
+			);
+			if (other !== -1) {
+				pendingFocusRef.current = className;
+				setOwnIdx(other);
+				return;
+			}
+		}
 		const hit = named ?? t.byId.get(slowestSpanId(t) ?? "");
 		if (!hit) {
 			return;
 		}
 		setExpandedModules((prev) => new Set(prev).add(hit.module));
 		setSelectedId(hit.id);
-		setWin(windowAround(hit, t.maxMs));
+		const a = u(t.scale, hit.start);
+		const b = u(t.scale, hit.end, true);
+		setWin(
+			windowAround({ end: Math.max(a, b), start: Math.min(a, b) }, t.maxMs)
+		);
 		pendingScrollRef.current = hit.id;
 	};
 	const focusRef = useLatest(focusSpan);
 
-	// biome-ignore lint/correctness/useExhaustiveDependencies: focusRef is a stable useLatest ref; the handler must read the latest focus
 	useEffect(() => {
 		if (compact) {
 			return;
@@ -146,6 +177,18 @@ export function BootView({
 			registry.focus = undefined;
 		};
 	}, [compact]);
+
+	// A view switch gets a fresh window, selection, and open groups.
+	useEffect(() => {
+		setWin({ from: 0, to: timeline?.maxMs ?? 1 });
+		setSelectedId(null);
+		setExpandedModules(new Set(timeline?.groups.map((g) => g.module) ?? []));
+		const pending = pendingFocusRef.current;
+		if (pending) {
+			pendingFocusRef.current = null;
+			focusRef.current(pending);
+		}
+	}, [timeline]);
 
 	// The dock's compact view follows the module selected in the graph.
 	useEffect(() => {
@@ -197,7 +240,6 @@ export function BootView({
 	]);
 
 	// Clicks: group headers collapse, carets cascade, rows select.
-	// biome-ignore lint/correctness/useExhaustiveDependencies: the handler reads the latest selection and timeline through stable useLatest refs
 	useEffect(() => {
 		const rows = rowsRef.current;
 		if (!rows) {
@@ -364,7 +406,6 @@ export function BootView({
 
 	// Crosshair: a vertical line under the mouse with its time on a chip
 	// riding the axis, like an APM trace waterfall.
-	// biome-ignore lint/correctness/useExhaustiveDependencies: reads the latest window and axis through stable refs
 	useEffect(() => {
 		const main = mainRef.current;
 		const axis = axisRef.current;
@@ -386,7 +427,9 @@ export function BootView({
 			const x = ev.clientX - rect.left;
 			line.style.display = "block";
 			line.style.left = `${x}px`;
-			chip.textContent = formatMs(timeAt(ev.clientX, axis, winRef.current));
+			chip.textContent = formatMs(
+				timeAt(ev.clientX, axis, winRef.current, timelineRef.current?.scale)
+			);
 			chip.style.top = `${axisRect.top - rect.top}px`;
 			// The chip rides the line; clamp it so it never leaves the lanes.
 			const half = chip.offsetWidth / 2 + 2;
@@ -441,6 +484,23 @@ export function BootView({
 		<div className={viewClasses} ref={viewRef}>
 			{!compact && <BootResizer viewRef={viewRef} />}
 			<div className="boot-main" ref={mainRef}>
+				{!compact && traceIndex === undefined && views.length > 1 && (
+					<div className="boot-trace-picker">
+						{views.map((v, i) => {
+							const cls = i === activeIdx ? "active" : undefined;
+							return (
+								<button
+									className={cls}
+									key={`${v.project ?? ""}:${v.label}`}
+									onClick={() => setOwnIdx(i)}
+									type="button"
+								>
+									{v.label}
+								</button>
+							);
+						})}
+					</div>
+				)}
 				<div className="boot-head">
 					<BootSideHead
 						classCount={timeline.byId.size}
