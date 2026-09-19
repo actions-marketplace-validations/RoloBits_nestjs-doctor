@@ -4,7 +4,7 @@ export const metadata = docsMetadata["/docs/setup"];
 
 <BreadcrumbJsonLd path="/docs/setup" />
 
-# Quickstart
+# Scan a NestJS project with npx nestjs-doctor
 
 Run this at your project root:
 
@@ -12,7 +12,7 @@ Run this at your project root:
 npx nestjs-doctor@latest .
 ```
 
-No config file, nothing to set up. It reads your TypeScript, runs 52 rules, and
+No config file, nothing to set up. It reads your TypeScript, runs its rules, and
 prints a score out of 100. Your code never leaves the machine; what the scan
 itself reports appears on [Telemetry](/docs/telemetry).
 
@@ -85,7 +85,7 @@ recover, and nothing marks the file as partly read.
 |------|---------|
 | `0` | Passed |
 | `1` | A gate failed: errors were found, or the score is below `--min-score` |
-| `2` | Bad input: the path does not exist, or a flag is invalid |
+| `2` | Bad input: the path does not exist, holds no TypeScript files, or a flag is invalid |
 | `130` | The scan was cancelled with Ctrl+C |
 
 The console report exits `1` on any error-severity finding. The machine-readable

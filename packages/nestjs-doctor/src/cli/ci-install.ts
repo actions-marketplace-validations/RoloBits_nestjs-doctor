@@ -60,7 +60,7 @@ export const buildWorkflow = (
 	defaultBranch: string
 ): string => `# nestjs-doctor — health score, diagnostics, and pull request review for NestJS.
 #
-# Docs:   https://nestjs.doctor/docs/ci
+# Docs:   https://www.nestjs.doctor/docs/ci
 # Source: https://github.com/RoloBits/nestjs-doctor
 
 name: nestjs-doctor
@@ -97,7 +97,7 @@ jobs:
       - uses: RoloBits/nestjs-doctor@v1
         # Advisory by default: the action comments and publishes a commit status,
         # and never fails the check. Uncomment a key below to change that.
-        # Every input: https://nestjs.doctor/docs/ci
+        # Every input: https://www.nestjs.doctor/docs/ci
         # with:
         #   blocking: error           # Fail on: none (default), warning, error
         #   min-score: "80"           # Fail when the whole-project score drops below this
@@ -162,38 +162,40 @@ const display = (workflowPath: string): string => {
 	return fromCwd && !fromCwd.startsWith("..") ? fromCwd : workflowPath;
 };
 
+/** Installs the workflow and prints the outcome. Returns the exit code with it. */
 export const runCiInstall = async (
 	targetPath: string,
 	force: boolean
-): Promise<number> => {
+): Promise<{ code: number; status: InstallStatus }> => {
 	const result = await installCiWorkflow(targetPath, force);
 	const shown = display(result.workflowPath);
+	const { status } = result;
 
-	if (result.status === "no-repo") {
+	if (status === "no-repo") {
 		logger.error(
 			"Not a git repository, so there is no repository root to write to."
 		);
 		logger.dim("Run this from your project, or `git init` first.");
-		return 2;
+		return { code: 2, status };
 	}
 
-	if (result.status === "symlink") {
+	if (status === "symlink") {
 		logger.error(`Refusing to write through a symlink: ${shown}`);
 		logger.dim(
 			"Replace it with a real directory or file, then run this again."
 		);
-		return 2;
+		return { code: 2, status };
 	}
 
-	if (result.status === "failed") {
+	if (status === "failed") {
 		logger.error(`Could not write ${shown} (${result.reason})`);
-		return 1;
+		return { code: 1, status };
 	}
 
-	if (result.status === "exists") {
+	if (status === "exists") {
 		logger.warn(`${shown} already exists — left untouched.`);
 		logger.dim("Run with --force to replace it.");
-		return 0;
+		return { code: 0, status };
 	}
 
 	logger.success(`Created ${shown}`);
@@ -202,5 +204,5 @@ export const runCiInstall = async (
 	for (const step of ciNextSteps()) {
 		logger.dim(step);
 	}
-	return 0;
+	return { code: 0, status };
 };
